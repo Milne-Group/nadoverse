@@ -69,7 +69,7 @@ def test_seqnado_generate_config_rejects_prompt_only_modes(monkeypatch, tmp_path
 
 def test_bamnado_bam_coverage_invokes_cli(monkeypatch, tmp_path):
     mcp_server = _import_mcp_server(monkeypatch)
-    monkeypatch.setitem(sys.modules, "bamnado", types.SimpleNamespace())
+    monkeypatch.setattr(mcp_server.shutil, "which", lambda command: f"/bin/{command}")
     calls = []
 
     def fake_run(args):
@@ -100,6 +100,9 @@ def test_bamnado_bam_coverage_invokes_cli(monkeypatch, tmp_path):
             "raw",
             "--threads",
             "6",
+            "--bin-size",
+            "50",
+            "--fragment-counts",
             "--strand",
             "both",
             "--min-mapq",
@@ -108,9 +111,144 @@ def test_bamnado_bam_coverage_invokes_cli(monkeypatch, tmp_path):
             "20",
             "--max-length",
             "1000",
-            "--bin-size",
-            "50",
-            "--fragment-counts",
         ]
     ]
     assert result == f"Coverage written to {output}"
+
+
+def test_bamnado_multi_bam_coverage_invokes_cli(monkeypatch, tmp_path):
+    mcp_server = _import_mcp_server(monkeypatch)
+    monkeypatch.setattr(mcp_server.shutil, "which", lambda command: f"/bin/{command}")
+    calls = []
+
+    def fake_run(args):
+        calls.append(args)
+        return ""
+
+    monkeypatch.setattr(mcp_server, "_run", fake_run)
+    output = tmp_path / "merged.bw"
+
+    result = mcp_server.bamnado_multi_bam_coverage(
+        ["/data/a.bam", "/data/b.bam"],
+        str(output),
+        normalize="cpm",
+        proper_pairs=True,
+    )
+
+    assert calls == [
+        [
+            "bamnado",
+            "multi-bam-coverage",
+            "--output",
+            str(output),
+            "--bams",
+            "/data/a.bam",
+            "--bams",
+            "/data/b.bam",
+            "--normalize",
+            "cpm",
+            "--threads",
+            "6",
+            "--bin-size",
+            "50",
+            "--strand",
+            "both",
+            "--min-mapq",
+            "20",
+            "--min-length",
+            "20",
+            "--max-length",
+            "1000",
+            "--proper-pairs",
+        ]
+    ]
+    assert result == f"Coverage written to {output}"
+
+
+def test_bamnado_bigwig_compare_invokes_cli(monkeypatch, tmp_path):
+    mcp_server = _import_mcp_server(monkeypatch)
+    monkeypatch.setattr(mcp_server.shutil, "which", lambda command: f"/bin/{command}")
+    calls = []
+
+    def fake_run(args):
+        calls.append(args)
+        return ""
+
+    monkeypatch.setattr(mcp_server, "_run", fake_run)
+    output = tmp_path / "compare.bw"
+
+    result = mcp_server.bamnado_bigwig_compare(
+        "/data/a.bw",
+        "/data/b.bw",
+        str(output),
+        "log-ratio",
+        pseudocount=1.0,
+    )
+
+    assert calls == [
+        [
+            "bamnado",
+            "bigwig-compare",
+            "--bw1",
+            "/data/a.bw",
+            "--bw2",
+            "/data/b.bw",
+            "--output",
+            str(output),
+            "--comparison",
+            "log-ratio",
+            "--bin-size",
+            "50",
+            "--threads",
+            "6",
+            "--pseudocount",
+            "1.0",
+        ]
+    ]
+    assert result == f"BigWig comparison written to {output}"
+
+
+def test_bamnado_modify_invokes_cli(monkeypatch, tmp_path):
+    mcp_server = _import_mcp_server(monkeypatch)
+    monkeypatch.setattr(mcp_server.shutil, "which", lambda command: f"/bin/{command}")
+    calls = []
+
+    def fake_run(args):
+        calls.append(args)
+        return ""
+
+    monkeypatch.setattr(mcp_server, "_run", fake_run)
+    output_prefix = tmp_path / "shifted"
+
+    result = mcp_server.bamnado_modify(
+        "/data/sample.bam",
+        str(output_prefix),
+        tn5_shift=True,
+        tag="CB",
+        tag_value="cell-1",
+    )
+
+    assert calls == [
+        [
+            "bamnado",
+            "modify",
+            "--input",
+            "/data/sample.bam",
+            "--output",
+            str(output_prefix),
+            "--strand",
+            "both",
+            "--min-mapq",
+            "20",
+            "--min-length",
+            "20",
+            "--max-length",
+            "1000",
+            "--tag",
+            "CB",
+            "--tag-value",
+            "cell-1",
+            "--tn5-shift",
+        ]
+    ]
+    assert result == f"Modified BAM written with prefix {output_prefix}"
