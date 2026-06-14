@@ -1,0 +1,59 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "nadoverse"
+dynamic = ["version"]
+description = "Unified installer and CLI for the *Nado bioinformatics toolkit"
+readme = "README.md"
+requires-python = ">=3.12"
+license = { text = "MIT" }
+authors = [{ name = "Alastair Smith", email = "alastair.smith@ndcls.ox.ac.uk" }]
+keywords = ["bioinformatics", "genomics", "sequencing", "meta-package"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "Topic :: Scientific/Engineering :: Bio-Informatics",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+]
+dependencies = []
+
+[project.optional-dependencies]
+seqnado   = ["seqnado>=1.0.6"]
+plotnado  = ["plotnado>=0.3.1"]
+tracknado = ["tracknado>=0.3.1"]
+bamnado   = ["bamnado>=0.6.1"]
+quantnado = ["quantnado>=0.4.8"]
+mccnado   = ["mccnado>=0.1.5"]
+tabnado   = ["tabnado>=0.1.0"]
+mcp       = ["fastmcp>=3.0"]
+all       = [
+    "nadoverse[seqnado,plotnado,tracknado,bamnado,quantnado,mccnado,tabnado]",
+]
+dev = [
+    "pytest>=8.0",
+    "pytest-subprocess>=1.5",
+]
+# Reserved extras — not yet published to PyPI:
+# wignado       = []
+# peaknado      = []
+# psudobulknado = []
+
+[project.scripts]
+nado         = "nadoverse.cli:app"
+nadoverse-mcp = "nadoverse.mcp_server:main"
+
+[project.urls]
+Repository = "https://github.com/alsmith151/nadoverse"
+
+[tool.hatch.version]
+path = "src/nadoverse/__init__.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/nadoverse"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
