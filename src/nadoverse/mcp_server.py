@@ -3,8 +3,6 @@ Local stdio (or remote HTTP) MCP server for the *Nado bioinformatics toolkit.
 
 Each tool imports its library lazily so the server starts even when only a
 subset of extras are installed. Missing packages produce a clear install hint.
-Container fallback: tools with a published ghcr.io image can run via Docker or
-Apptainer when the package is not installed locally.
 
 Usage:
     pip install nadoverse[mcp]      # adds fastmcp
@@ -19,13 +17,11 @@ from __future__ import annotations
 
 import json
 import os
-import shutil
 import subprocess
-from functools import lru_cache
 from pathlib import Path
 from typing import Any, Optional
 
-from nadoverse.registry import all_tools, get_tool
+from nadoverse.registry import all_tools
 
 try:
     from fastmcp import FastMCP
@@ -55,82 +51,12 @@ def _run(cmd: list[str]) -> str:
     return result.stdout.strip()
 
 
-# ─── Container helpers ───────────────────────────────────────────────────────
-
-@lru_cache(maxsize=None)
-def _container_runtime() -> Optional[str]:
-    """Detect available container runtime. Result cached after first call."""
-    try:
-        if subprocess.run(["docker", "info"], capture_output=True, timeout=5).returncode == 0:
-            return "docker"
-    except (FileNotFoundError, subprocess.TimeoutExpired):
-        pass
-    try:
-        if subprocess.run(["apptainer", "--version"], capture_output=True, timeout=5).returncode == 0:
-            return "apptainer"
-    except (FileNotFoundError, subprocess.TimeoutExpired):
-        pass
-    return None
-
-
-def _volume_flags(runtime: str, *paths: str) -> list[str]:
-    """Return -v / --bind flags for unique parent directories of the given paths."""
-    seen: set[str] = set()
-    mounts: list[str] = []
-    for p in paths:
-        parent = str(Path(p).resolve().parent)
-        if parent not in seen:
-            seen.add(parent)
-            mounts.append(parent)
-    if not mounts:
-        return []
-    if runtime == "docker":
-        flags: list[str] = []
-        for m in mounts:
-            flags += ["-v", f"{m}:{m}"]
-        return flags
-    return ["--bind", ",".join(f"{m}:{m}" for m in mounts)]
-
-
-def _run_in_container(image: str, args: list[str], *file_paths: str) -> str:
-    """Run args inside image. The image ENTRYPOINT is assumed to be the binary."""
-    runtime = _container_runtime()
-    if runtime is None:
-        raise RuntimeError(
-            "Neither docker nor apptainer found. Install the tool or a container runtime."
-        )
-    vols = _volume_flags(runtime, *file_paths)
-    if runtime == "docker":
-        cmd = ["docker", "run", "--rm"] + vols + [image] + args
-    else:
-        cmd = ["apptainer", "run"] + vols + [f"docker://{image}"] + args
-    return _run(cmd)
-
-
-def _run_python_in_container(image: str, code: str, *file_paths: str) -> str:
-    """Run a Python one-liner inside image, return stdout."""
-    runtime = _container_runtime()
-    if runtime is None:
-        raise RuntimeError(
-            "Neither docker nor apptainer found. Install the tool or a container runtime."
-        )
-    vols = _volume_flags(runtime, *file_paths)
-    if runtime == "docker":
-        cmd = ["docker", "run", "--rm"] + vols + [image, "python", "-c", code]
-    else:
-        cmd = ["apptainer", "run"] + vols + [f"docker://{image}", "python", "-c", code]
-    result = subprocess.run(cmd, capture_output=True, text=True)
-    if result.returncode != 0:
-        raise RuntimeError(result.stderr.strip() or "Container python execution failed")
-    return result.stdout.strip()
-
-
 # ─── Registry ────────────────────────────────────────────────────────────────
 
 @mcp.tool(
     description=(
         "List all *Nado tools: install status, version, CLI entrypoints, "
-        "container image, input/output types. Call this first to know what is available."
+        "input/output types. Call this first to know what is available."
     ),
     annotations={"readOnlyHint": True, "destructiveHint": False},
 )
@@ -142,7 +68,6 @@ def list_nado_tools() -> str:
             "version": t.installed_version(),
             "cli_command": t.cli_command,
             "install_hint": f"pip install nadoverse[{t.install_extra}]",
-            "container_image": t.container_image,
             "input_types": t.input_types,
             "output_types": t.output_types,
             "python_compatible": t.python_compatible(),
@@ -156,7 +81,12 @@ def list_nado_tools() -> str:
 # ─── BamNado ─────────────────────────────────────────────────────────────────
 
 @mcp.tool(
-    description="Extract per-bin coverage signal for one chromosome from a BAM file (Python API, local only).",
+    description=(
+        "Extract per-bin coverage signal for one chromosome from a sorted, indexed BAM file. "
+        "Returns a float32 array of length chrom_size // bin_size. "
+        "Use scale_factor = 1e6 / total_mapped_reads for CPM normalisation. "
+        "Call list_nado_tools first to confirm bamnado is installed."
+    ),
     annotations={"readOnlyHint": True, "destructiveHint": False},
 )
 def bamnado_get_signal(
@@ -167,7 +97,29 @@ def bamnado_get_signal(
     use_fragment: bool = False,
     ignore_scaffold_chromosomes: bool = True,
 ) -> dict[str, Any]:
-    """Returns dict with 'chromosome', 'bin_size', 'n_bins', and 'signal' (list[float])."""
+    """
+    Args:
+        bam_path: Absolute path to a sorted, indexed BAM file. A corresponding
+            .bai index file must exist alongside it (run `samtools index` first).
+        chromosome: Exact contig name as it appears in the BAM header. Use
+            `samtools view -H sample.bam | grep '^@SQ'` to list valid names.
+            UCSC-style uses 'chr1'; Ensembl-style uses '1'.
+        bin_size: Coverage bin width in base pairs. Smaller values give finer
+            resolution but produce a larger array. 50 for fine ChIP signal,
+            200 for broad chromatin domains.
+        scale_factor: Linear multiplier applied to every bin value after counting.
+            Use 1e6 / total_mapped_reads for CPM normalisation; default 1.0
+            returns raw read counts.
+        use_fragment: If True, count paired-end fragment spans (insert size)
+            rather than individual read alignments. Use True for ATAC-seq
+            fragment-mode coverage; False for single-end or read-level counting.
+        ignore_scaffold_chromosomes: If True, skip non-standard contigs such as
+            chrUn_*, *_random, and EBV. Recommended True for standard analyses.
+
+    Returns:
+        Dict with 'chromosome' (str), 'bin_size' (int), 'n_bins' (int),
+        and 'signal' (list[float]) — one float per bin across the chromosome.
+    """
     try:
         from bamnado import get_signal_for_chromosome
     except ImportError:
@@ -189,375 +141,25 @@ def bamnado_get_signal(
     }
 
 
-def _bamnado_run(args: list[str], *file_paths: str) -> str:
-    """Run bamnado CLI locally or via container. args excludes the 'bamnado' binary name."""
-    if shutil.which("bamnado"):
-        return _run(["bamnado"] + args)
-    tool = get_tool("bamnado")
-    if tool and tool.container_image and _container_runtime():
-        return _run_in_container(tool.container_image, args, *file_paths)
-    raise RuntimeError(_install_hint("bamnado", "bamnado"))
-
-
-@mcp.tool(
-    description=(
-        "Generate a coverage track (bedGraph or BigWig) from a BAM file. "
-        "Output format is inferred from the file extension (.bedgraph or .bw). "
-        "Runs locally if bamnado is on PATH, otherwise via container."
-    ),
-    annotations={"readOnlyHint": False, "destructiveHint": False},
-)
-def bamnado_bam_coverage(
-    bam: str,
-    output: str,
-    bin_size: Optional[int] = None,
-    normalize: str = "raw",
-    scale_factor: Optional[float] = None,
-    fragment_counts: bool = False,
-    ignore_scaffolds: bool = False,
-    threads: int = 6,
-    strand: str = "both",
-    proper_pairs: bool = False,
-    min_mapq: int = 20,
-    min_length: int = 20,
-    max_length: int = 1000,
-    min_fragment_len: Optional[int] = None,
-    max_fragment_len: Optional[int] = None,
-    blacklist: Optional[str] = None,
-    barcode_allowlist: Optional[str] = None,
-    read_group: Optional[str] = None,
-    tag: Optional[str] = None,
-    tag_value: Optional[str] = None,
-) -> str:
-    """normalize: 'raw', 'rpkm', or 'cpm'. strand: 'both', 'forward', or 'reverse'."""
-    args = ["bam-coverage", "--bam", bam, "--output", output,
-            "--normalize", normalize, "--threads", str(threads),
-            "--strand", strand, "--min-mapq", str(min_mapq),
-            "--min-length", str(min_length), "--max-length", str(max_length)]
-    if bin_size is not None:
-        args += ["--bin-size", str(bin_size)]
-    if scale_factor is not None:
-        args += ["--scale-factor", str(scale_factor)]
-    if fragment_counts:
-        args.append("--fragment-counts")
-    if ignore_scaffolds:
-        args.append("--ignore-scaffolds")
-    if proper_pairs:
-        args.append("--proper-pairs")
-    if min_fragment_len is not None:
-        args += ["--min-fragment-len", str(min_fragment_len)]
-    if max_fragment_len is not None:
-        args += ["--max-fragment-len", str(max_fragment_len)]
-    file_paths = [bam, output]
-    if blacklist:
-        args += ["--blacklist", blacklist]
-        file_paths.append(blacklist)
-    if barcode_allowlist:
-        args += ["--barcode-allowlist", barcode_allowlist]
-        file_paths.append(barcode_allowlist)
-    if read_group:
-        args += ["--read-group", read_group]
-    if tag:
-        args += ["--tag", tag]
-    if tag_value:
-        args += ["--tag-value", tag_value]
-    return _bamnado_run(args, *file_paths)
-
-
-@mcp.tool(
-    description="Merge coverage from multiple BAM files into one bedGraph or BigWig track.",
-    annotations={"readOnlyHint": False, "destructiveHint": False},
-)
-def bamnado_multi_bam_coverage(
-    bams: list[str],
-    output: str,
-    bin_size: Optional[int] = None,
-    normalize: str = "raw",
-    scale_factor: Optional[float] = None,
-    fragment_counts: bool = False,
-    ignore_scaffolds: bool = False,
-    threads: int = 6,
-    strand: str = "both",
-    proper_pairs: bool = False,
-    min_mapq: int = 20,
-    min_fragment_len: Optional[int] = None,
-    max_fragment_len: Optional[int] = None,
-    blacklist: Optional[str] = None,
-    barcode_allowlist: Optional[str] = None,
-) -> str:
-    args = ["multi-bam-coverage", "--output", output,
-            "--normalize", normalize, "--threads", str(threads),
-            "--strand", strand, "--min-mapq", str(min_mapq)]
-    for b in bams:
-        args += ["--bams", b]
-    if bin_size is not None:
-        args += ["--bin-size", str(bin_size)]
-    if scale_factor is not None:
-        args += ["--scale-factor", str(scale_factor)]
-    if fragment_counts:
-        args.append("--fragment-counts")
-    if ignore_scaffolds:
-        args.append("--ignore-scaffolds")
-    if proper_pairs:
-        args.append("--proper-pairs")
-    if min_fragment_len is not None:
-        args += ["--min-fragment-len", str(min_fragment_len)]
-    if max_fragment_len is not None:
-        args += ["--max-fragment-len", str(max_fragment_len)]
-    file_paths = bams + [output]
-    if blacklist:
-        args += ["--blacklist", blacklist]
-        file_paths.append(blacklist)
-    if barcode_allowlist:
-        args += ["--barcode-allowlist", barcode_allowlist]
-        file_paths.append(barcode_allowlist)
-    return _bamnado_run(args, *file_paths)
-
-
-@mcp.tool(
-    description=(
-        "Compare two BigWig files bin by bin. "
-        "comparison: 'subtract', 'ratio', or 'log-ratio'."
-    ),
-    annotations={"readOnlyHint": False, "destructiveHint": False},
-)
-def bamnado_bigwig_compare(
-    bw1: str,
-    bw2: str,
-    output: str,
-    comparison: str,
-    bin_size: int = 50,
-    pseudocount: Optional[float] = None,
-    scale_factor_bw1: Optional[float] = None,
-    scale_factor_bw2: Optional[float] = None,
-    threads: int = 6,
-) -> str:
-    args = ["bigwig-compare", "--bw1", bw1, "--bw2", bw2, "--output", output,
-            "--comparison", comparison, "--bin-size", str(bin_size), "--threads", str(threads)]
-    if pseudocount is not None:
-        args += ["--pseudocount", str(pseudocount)]
-    if scale_factor_bw1 is not None:
-        args += ["--scale-factor-bw1", str(scale_factor_bw1)]
-    if scale_factor_bw2 is not None:
-        args += ["--scale-factor-bw2", str(scale_factor_bw2)]
-    return _bamnado_run(args, bw1, bw2, output)
-
-
-@mcp.tool(
-    description=(
-        "Aggregate multiple BigWig files into one track. "
-        "method: 'mean', 'sum', 'median', 'min', or 'max'."
-    ),
-    annotations={"readOnlyHint": False, "destructiveHint": False},
-)
-def bamnado_bigwig_aggregate(
-    bigwigs: list[str],
-    output: str,
-    method: str,
-    bin_size: int = 50,
-    pseudocount: Optional[float] = None,
-    scale_factors: Optional[list[float]] = None,
-    threads: int = 6,
-) -> str:
-    args = ["bigwig-aggregate", "--output", output, "--method", method,
-            "--bin-size", str(bin_size), "--threads", str(threads)]
-    for bw in bigwigs:
-        args += ["--bigwigs", bw]
-    if pseudocount is not None:
-        args += ["--pseudocount", str(pseudocount)]
-    if scale_factors:
-        for sf in scale_factors:
-            args += ["--scale-factors", str(sf)]
-    return _bamnado_run(args, *bigwigs, output)
-
-
-@mcp.tool(
-    description="Infer scaling factor and library size from a CPM/RPKM-normalised BigWig file.",
-    annotations={"readOnlyHint": True, "destructiveHint": False},
-)
-def bamnado_bigwig_infer_scale(
-    bigwig: str,
-    output: Optional[str] = None,
-    format: str = "json",
-) -> str:
-    """format: 'table', 'tsv', or 'json'."""
-    args = ["bigwig-infer-scale", "--bigwig", bigwig, "--format", format]
-    file_paths = [bigwig]
-    if output:
-        args += ["--output", output]
-        file_paths.append(output)
-    return _bamnado_run(args, *file_paths)
-
-
-@mcp.tool(
-    description="Collapse adjacent equal-score bins in a bedGraph file.",
-    annotations={"readOnlyHint": False, "destructiveHint": False},
-)
-def bamnado_collapse_bedgraph(
-    input: str,
-    output: str,
-) -> str:
-    return _bamnado_run(["collapse-bedgraph", "--input", input, "--output", output], input, output)
-
-
-@mcp.tool(
-    description="Split a BAM file using read filters. Writes filtered reads to output prefix.",
-    annotations={"readOnlyHint": False, "destructiveHint": False},
-)
-def bamnado_split(
-    input: str,
-    output: str,
-    strand: str = "both",
-    proper_pairs: bool = False,
-    min_mapq: int = 20,
-    min_length: int = 20,
-    max_length: int = 1000,
-    min_fragment_len: Optional[int] = None,
-    max_fragment_len: Optional[int] = None,
-    tag: Optional[str] = None,
-    tag_value: Optional[str] = None,
-    barcode_allowlist: Optional[str] = None,
-    read_group: Optional[str] = None,
-) -> str:
-    args = ["split", "--input", input, "--output", output,
-            "--strand", strand, "--min-mapq", str(min_mapq),
-            "--min-length", str(min_length), "--max-length", str(max_length)]
-    if proper_pairs:
-        args.append("--proper-pairs")
-    if min_fragment_len is not None:
-        args += ["--min-fragment-len", str(min_fragment_len)]
-    if max_fragment_len is not None:
-        args += ["--max-fragment-len", str(max_fragment_len)]
-    file_paths = [input, output]
-    if tag:
-        args += ["--tag", tag]
-    if tag_value:
-        args += ["--tag-value", tag_value]
-    if barcode_allowlist:
-        args += ["--barcode-allowlist", barcode_allowlist]
-        file_paths.append(barcode_allowlist)
-    if read_group:
-        args += ["--read-group", read_group]
-    return _bamnado_run(args, *file_paths)
-
-
-@mcp.tool(
-    description=(
-        "Split a BAM file into endogenous and exogenous (spike-in) reads. "
-        "exogenous_prefix: chromosome name prefix that identifies spike-in sequences (e.g. 'dm6_')."
-    ),
-    annotations={"readOnlyHint": False, "destructiveHint": False},
-)
-def bamnado_split_exogenous(
-    input: str,
-    output: str,
-    exogenous_prefix: str,
-    stats: Optional[str] = None,
-    allow_unknown_mapq: bool = False,
-    min_mapq: int = 20,
-) -> str:
-    args = ["split-exogenous", "--input", input, "--output", output,
-            "--exogenous-prefix", exogenous_prefix, "--min-mapq", str(min_mapq)]
-    file_paths = [input, output]
-    if stats:
-        args += ["--stats", stats]
-        file_paths.append(stats)
-    if allow_unknown_mapq:
-        args.append("--allow-unknown-mapq")
-    return _bamnado_run(args, *file_paths)
-
-
-@mcp.tool(
-    description="Filter and/or adjust reads in a BAM file. Optionally apply the Tn5 offset for ATAC-seq.",
-    annotations={"readOnlyHint": False, "destructiveHint": False},
-)
-def bamnado_modify(
-    input: str,
-    output: str,
-    tn5_shift: bool = False,
-    strand: str = "both",
-    proper_pairs: bool = False,
-    min_mapq: int = 20,
-    min_length: int = 20,
-    max_length: int = 1000,
-    min_fragment_len: Optional[int] = None,
-    max_fragment_len: Optional[int] = None,
-    tag: Optional[str] = None,
-    tag_value: Optional[str] = None,
-) -> str:
-    args = ["modify", "--input", input, "--output", output,
-            "--strand", strand, "--min-mapq", str(min_mapq),
-            "--min-length", str(min_length), "--max-length", str(max_length)]
-    if tn5_shift:
-        args.append("--tn5-shift")
-    if proper_pairs:
-        args.append("--proper-pairs")
-    if min_fragment_len is not None:
-        args += ["--min-fragment-len", str(min_fragment_len)]
-    if max_fragment_len is not None:
-        args += ["--max-fragment-len", str(max_fragment_len)]
-    if tag:
-        args += ["--tag", tag]
-    if tag_value:
-        args += ["--tag-value", tag_value]
-    return _bamnado_run(args, input, output)
-
-
 # ─── MCCNado ─────────────────────────────────────────────────────────────────
-
-def _mccnado_run(args: list[str], *file_paths: str) -> str:
-    """Run mccnado CLI locally or via container. args excludes 'mccnado'."""
-    if shutil.which("mccnado"):
-        return _run(["mccnado"] + args)
-    tool = get_tool("mccnado")
-    if tool and tool.container_image and _container_runtime():
-        return _run_in_container(tool.container_image, args, *file_paths)
-    raise RuntimeError(_install_hint("mccnado", "mccnado"))
-
-
-@mcp.tool(
-    description="Annotate a Micro-Capture-C BAM file with viewpoint and fragment information.",
-    annotations={"readOnlyHint": False, "destructiveHint": False},
-)
-def mccnado_annotate_bam(bam: str, output: str) -> str:
-    """bam must be sorted by query name."""
-    return _mccnado_run(["annotate-bam", bam, output], bam, output)
-
+#
+# MCC pipeline order:
+#   Step 1  mccnado_deduplicate_fastq      — PCR dedup on raw FASTQs (pre-alignment)
+#   [external]  align with BWA-MEM2
+#   Step 2  mccnado_annotate_bam           — add VP/OC/RT tags (BAM sorted by name)
+#   Step 3  mccnado_deduplicate_bam        — coordinate dedup using annotation tags
+#   Step 4  mccnado_split_viewpoint_reads  — split into per-viewpoint BAMs
+#   Step 5  mccnado_identify_ligation_junctions — per-viewpoint cooler files
+#   Step 6  mccnado_extract_ligation_stats — JSON cis/trans stats (parallel with 5)
+#   Step 7  mccnado_combine_coolers        — merge per-viewpoint coolers
 
 @mcp.tool(
-    description="Remove PCR duplicates from an annotated MCC BAM file.",
-    annotations={"readOnlyHint": False, "destructiveHint": False},
-)
-def mccnado_deduplicate_bam(bam: str, output: str) -> str:
-    return _mccnado_run(["deduplicate-bam", bam, output], bam, output)
-
-
-@mcp.tool(
-    description="Split MCC BAM reads by viewpoint into separate BAM files.",
-    annotations={"readOnlyHint": False, "destructiveHint": False},
-)
-def mccnado_split_viewpoint_reads(bam: str, output: str) -> str:
-    return _mccnado_run(["split-viewpoint-reads", bam, output], bam, output)
-
-
-@mcp.tool(
-    description="Compute ligation junction statistics from an MCC BAM file.",
-    annotations={"readOnlyHint": True, "destructiveHint": False},
-)
-def mccnado_extract_ligation_stats(bam: str, stats_output: str) -> str:
-    return _mccnado_run(["extract-ligation-stats", bam, stats_output], bam, stats_output)
-
-
-@mcp.tool(
-    description="Identify ligation junctions in an MCC BAM and write per-viewpoint output.",
-    annotations={"readOnlyHint": False, "destructiveHint": False},
-)
-def mccnado_identify_ligation_junctions(bam: str, outdir: str) -> str:
-    return _mccnado_run(["identify-ligation-junctions", bam, outdir], bam, outdir)
-
-
-@mcp.tool(
-    description="Deduplicate paired-end FASTQ files before MCC alignment.",
+    description=(
+        "MCC Step 1 of 7: Deduplicate paired-end FASTQ files before alignment. "
+        "Removes PCR duplicates from raw reads based on sequence identity. "
+        "Run before alignment with BWA-MEM2. "
+        "Next step: align deduplicated FASTQs, then call mccnado_annotate_bam."
+    ),
     annotations={"readOnlyHint": False, "destructiveHint": False},
 )
 def mccnado_deduplicate_fastq(
@@ -567,28 +169,190 @@ def mccnado_deduplicate_fastq(
     output_2: str,
     stats_prefix: str,
 ) -> str:
-    return _mccnado_run(
-        ["deduplicate-fastq", fastq_1, fastq_2, output_1, output_2, "--stats-prefix", stats_prefix],
+    """
+    Args:
+        fastq_1: Path to R1 FASTQ file (gzip-compressed OK).
+        fastq_2: Path to R2 FASTQ file (gzip-compressed OK).
+        output_1: Output path for deduplicated R1 FASTQ.
+        output_2: Output path for deduplicated R2 FASTQ.
+        stats_prefix: Filename prefix for statistics output files
+            (e.g. 'dedup_stats/sample1' writes 'sample1.json' and 'sample1.txt').
+    """
+    return _run([
+        "mccnado", "deduplicate-fastq",
         fastq_1, fastq_2, output_1, output_2,
-    )
+        "--stats-prefix", stats_prefix,
+    ])
 
 
 @mcp.tool(
-    description="Merge multiple per-viewpoint ligation junction cooler files into one.",
+    description=(
+        "MCC Step 2 of 7: Annotate an aligned MCC BAM with viewpoint (VP), "
+        "on-capture (OC), and reporter (RT) tags needed for all downstream steps. "
+        "BAM must be sorted by query name (samtools sort -n) before calling this. "
+        "Next step: mccnado_deduplicate_bam."
+    ),
+    annotations={"readOnlyHint": False, "destructiveHint": False},
+)
+def mccnado_annotate_bam(bam: str, output: str) -> str:
+    """
+    Args:
+        bam: Path to aligned BAM sorted by query name (samtools sort -n).
+            Coordinate-sorted BAMs will fail — sort by name first.
+        output: Path for the annotated output BAM.
+    """
+    return _run(["mccnado", "annotate-bam", bam, output])
+
+
+@mcp.tool(
+    description=(
+        "MCC Step 3 of 7: Remove PCR duplicates from an annotated MCC BAM. "
+        "Uses coordinate positions together with VP/OC/RT annotation tags "
+        "for accurate duplicate detection in MCC data. "
+        "Input must be the output of mccnado_annotate_bam. "
+        "Next step: mccnado_split_viewpoint_reads."
+    ),
+    annotations={"readOnlyHint": False, "destructiveHint": False},
+)
+def mccnado_deduplicate_bam(bam: str, output: str) -> str:
+    """
+    Args:
+        bam: Annotated BAM from mccnado_annotate_bam (coordinate-sorted is fine here).
+        output: Path for the deduplicated output BAM.
+    """
+    return _run(["mccnado", "deduplicate-bam", bam, output])
+
+
+@mcp.tool(
+    description=(
+        "MCC Step 4 of 7: Split a deduplicated MCC BAM by viewpoint into separate BAM files. "
+        "Each output BAM contains reads from a single viewpoint for independent analysis. "
+        "Input must be the output of mccnado_deduplicate_bam. "
+        "Next step: mccnado_identify_ligation_junctions on each viewpoint BAM."
+    ),
+    annotations={"readOnlyHint": False, "destructiveHint": False},
+)
+def mccnado_split_viewpoint_reads(bam: str, output: str) -> str:
+    """
+    Args:
+        bam: Deduplicated, annotated BAM from mccnado_deduplicate_bam.
+        output: Output directory where per-viewpoint BAM files will be written.
+    """
+    return _run(["mccnado", "split-viewpoint-reads", bam, output])
+
+
+@mcp.tool(
+    description=(
+        "MCC Step 5 of 7: Identify ligation junctions in an MCC BAM and write "
+        "per-viewpoint cooler files to the output directory. "
+        "Can be run in parallel with mccnado_extract_ligation_stats (Step 6). "
+        "Next step: mccnado_combine_coolers to merge the per-viewpoint coolers."
+    ),
+    annotations={"readOnlyHint": False, "destructiveHint": False},
+)
+def mccnado_identify_ligation_junctions(bam: str, outdir: str) -> str:
+    """
+    Args:
+        bam: Annotated, deduplicated BAM (output of mccnado_deduplicate_bam
+            or a per-viewpoint BAM from mccnado_split_viewpoint_reads).
+        outdir: Directory where per-viewpoint .cool files will be written.
+            One cooler file is created per viewpoint.
+    """
+    return _run(["mccnado", "identify-ligation-junctions", bam, outdir])
+
+
+@mcp.tool(
+    description=(
+        "MCC Step 6 of 7 (parallel with Step 5): Compute ligation junction statistics "
+        "from an MCC BAM and write a JSON/TSV report. "
+        "Reports cis- vs. trans-interaction ratios and junction counts per viewpoint. "
+        "Can be run concurrently with mccnado_identify_ligation_junctions."
+    ),
+    annotations={"readOnlyHint": True, "destructiveHint": False},
+)
+def mccnado_extract_ligation_stats(bam: str, stats_output: str) -> str:
+    """
+    Args:
+        bam: Annotated, deduplicated BAM (output of mccnado_deduplicate_bam).
+        stats_output: Path for the output stats file (JSON or TSV depending on extension).
+    """
+    return _run(["mccnado", "extract-ligation-stats", bam, stats_output])
+
+
+@mcp.tool(
+    description=(
+        "MCC Step 7 of 7: Merge multiple per-viewpoint ligation junction cooler files "
+        "into a single multi-viewpoint cooler. "
+        "Input cooler files are produced by mccnado_identify_ligation_junctions."
+    ),
     annotations={"readOnlyHint": False, "destructiveHint": False},
 )
 def mccnado_combine_coolers(cooler_files: list[str], output: str) -> str:
-    return _mccnado_run(
-        ["combine-ligation-junction-coolers"] + cooler_files + ["--output", output],
-        *cooler_files, output,
+    """
+    Args:
+        cooler_files: List of per-viewpoint .cool files from
+            mccnado_identify_ligation_junctions. All must share the same
+            resolution and reference genome.
+        output: Output path for the merged multi-viewpoint cooler file.
+    """
+    return _run(
+        ["mccnado", "combine-ligation-junction-coolers"] + cooler_files + ["--output", output]
     )
 
 
 # ─── PlotNado ────────────────────────────────────────────────────────────────
 
+_PLOTNADO_YAML_SCHEMA = """\
+YAML template schema:
+  genome: hg38          # genome build; enables gene guides (hg38, mm10, dm6, ...)
+  width: 12.0           # figure width in inches
+  track_height: 1.0     # default panel height multiplier
+  guides:
+    genes: true         # add gene annotation panel (requires genome: set)
+  tracks:               # ordered list of panels, rendered top-to-bottom
+    - path: sample.bw
+      type: bigwig      # track type -- see valid types below
+      title: My Signal
+      color: "#1f77b4"  # any matplotlib colour string or name
+      height: 1.5       # relative panel height (multiplies track_height)
+      style: fill       # fill | fragment | scatter | std  (bigwig only)
+      group: grp1       # shared autoscale/colour group reference
+      options: {}       # extra kwargs forwarded to the figure method
+  groups:               # optional shared-scale group definitions
+    - name: grp1
+      autoscale: true
+      autocolor: true
+
+Valid track types (aliases in parentheses):
+  bigwig (bw, signal, bedgraph)  -- continuous signal from BigWig file
+  bed (annotation)               -- BED/BigBed intervals or peaks
+  narrowpeak                     -- ENCODE narrowPeak with score and summit display
+  genes (gene)                   -- gene models (requires genome: key to be set)
+  links                          -- paired anchors / loops from BEDPE-like file
+  overlay (bigwig_overlay)       -- multiple BigWig signals on one shared y-axis
+  scalebar (scale)               -- scale bar panel
+  axis                           -- y-axis reference panel
+  spacer                         -- blank gap between panels\
+"""
+
+_PLOTNADO_REGION_NOTE = (
+    "region: genomic window as 'chrN:start-end', "
+    "e.g. 'chr1:1,000,000-1,100,000' (commas optional)."
+)
+
+_PLOTNADO_OUTPUT_NOTE = (
+    "output_path: file extension sets format -- .png, .svg, or .pdf."
+)
 
 @mcp.tool(
-    description="Render a genomic figure from a plotnado YAML template file.",
+    description=(
+        "Render a genomic figure from a plotnado YAML template file. "
+        "Generate a starter template with plotnado_init_template, then edit it, "
+        "then render it here. "
+        + _PLOTNADO_REGION_NOTE + " "
+        + _PLOTNADO_OUTPUT_NOTE + "\n\n"
+        + _PLOTNADO_YAML_SCHEMA
+    ),
     annotations={"readOnlyHint": False, "destructiveHint": False},
 )
 def plotnado_from_template(
@@ -598,20 +362,22 @@ def plotnado_from_template(
     dpi: int = 300,
     theme: str = "publication",
 ) -> str:
-    """region: 'chrN:start-end'. output_path extension sets format (PNG/SVG/PDF)."""
+    """
+    Args:
+        template_yaml: Path to a YAML config file matching the schema described
+            above. Generate a starter with plotnado_init_template, then edit it
+            to adjust colours, heights, and track order before rendering.
+        region: Genomic window to render, e.g. 'chr1:1,000,000-1,100,000'.
+            Commas in coordinates are optional.
+        output_path: Destination file. Extension sets format: .png, .svg, or .pdf.
+        dpi: Raster resolution in dots per inch. 300 for publication figures,
+            150 for quick preview.
+        theme: Visual theme. 'publication' gives clean, minimal axes suitable
+            for papers. 'default' uses standard matplotlib styling.
+    """
     try:
         from plotnado.figure import GenomicFigure
     except ImportError:
-        tool = get_tool("plotnado")
-        if tool and tool.container_image and _container_runtime():
-            code = (
-                f"import matplotlib; matplotlib.use('Agg'); "
-                f"from plotnado.figure import GenomicFigure; "
-                f"fig = GenomicFigure.from_template({template_yaml!r}, theme={theme!r}); "
-                f"fig.save({output_path!r}, region={region!r}, dpi={dpi})"
-            )
-            _run_python_in_container(tool.container_image, code, template_yaml, output_path)
-            return f"Saved to {output_path}"
         raise RuntimeError(_install_hint("plotnado", "plotnado"))
 
     fig = GenomicFigure.from_template(template_yaml, theme=theme)
@@ -620,7 +386,12 @@ def plotnado_from_template(
 
 
 @mcp.tool(
-    description="Render a genomic figure from a saved IGV session XML file.",
+    description=(
+        "Render a genomic figure from a saved IGV session XML file. "
+        "Uses the session's stored locus if region is not provided. "
+        + _PLOTNADO_REGION_NOTE + " "
+        + _PLOTNADO_OUTPUT_NOTE
+    ),
     annotations={"readOnlyHint": False, "destructiveHint": False},
 )
 def plotnado_from_igv_session(
@@ -630,21 +401,19 @@ def plotnado_from_igv_session(
     dpi: int = 300,
     theme: str = "publication",
 ) -> str:
-    """Uses the session's stored locus if region is not provided."""
+    """
+    Args:
+        session_xml: Path to a saved IGV session XML file (File -> Save Session
+            in IGV). Track order, colours, and locus are read from the session.
+        output_path: Destination file. Extension sets format: .png, .svg, or .pdf.
+        region: Override the session's stored locus with a custom window,
+            e.g. 'chr1:1,000,000-1,100,000'. If omitted, the session locus is used.
+        dpi: Raster resolution. 300 for publication, 150 for preview.
+        theme: 'publication' for clean axes; 'default' for standard matplotlib.
+    """
     try:
         from plotnado.figure import GenomicFigure
     except ImportError:
-        tool = get_tool("plotnado")
-        if tool and tool.container_image and _container_runtime():
-            code = (
-                f"import matplotlib; matplotlib.use('Agg'); "
-                f"from plotnado.figure import GenomicFigure; "
-                f"fig, session_locus = GenomicFigure.from_igv_session({session_xml!r}, theme={theme!r}); "
-                f"locus = {region!r} or session_locus; "
-                f"fig.save({output_path!r}, region=locus, dpi={dpi})"
-            )
-            _run_python_in_container(tool.container_image, code, session_xml, output_path)
-            return f"Saved to {output_path}"
         raise RuntimeError(_install_hint("plotnado", "plotnado"))
 
     fig, session_locus = GenomicFigure.from_igv_session(session_xml, theme=theme)
@@ -657,9 +426,20 @@ def plotnado_from_igv_session(
 
 @mcp.tool(
     description=(
-        "Build and render a genomic figure from a list of track specifications. "
-        "Each track is a dict with a 'type' key plus track-specific params. "
-        "Common types: 'bigwig', 'bed', 'narrowpeak', 'genes', 'axis', 'scalebar'."
+        "Build and render a genomic figure from a list of track specifications -- "
+        "no YAML file needed. Each element in 'tracks' is a dict with a 'type' key "
+        "plus type-specific params. Track dict examples:\n"
+        '  {"type": "bigwig",     "path": "s.bw",  "title": "Signal", "color": "#1f77b4", "style": "fill"}\n'
+        '  {"type": "bed",        "path": "p.bed",  "title": "Peaks",  "show_labels": true}\n'
+        '  {"type": "narrowpeak", "path": "p.narrowPeak", "color_by": "score"}\n'
+        '  {"type": "genes",      "title": "Genes"}   (requires genome set in GenomicFigure)\n'
+        '  {"type": "links",      "path": "loops.bedpe", "color_by_score": true}\n'
+        '  {"type": "overlay",    "paths": ["a.bw","b.bw"], "titles": ["A","B"]}\n'
+        '  {"type": "scalebar"}\n'
+        '  {"type": "axis"}\n'
+        '  {"type": "spacer"}\n\n'
+        + _PLOTNADO_REGION_NOTE + " "
+        + _PLOTNADO_OUTPUT_NOTE
     ),
     annotations={"readOnlyHint": False, "destructiveHint": False},
 )
@@ -672,22 +452,22 @@ def plotnado_build(
     width: float = 12,
     highlight_regions: Optional[list[str]] = None,
 ) -> str:
+    """
+    Args:
+        tracks: Ordered list of track specification dicts, rendered top-to-bottom.
+            Each dict must have a 'type' key (see description for valid types and
+            examples). Additional keys are type-specific parameters.
+        region: Genomic window to render, e.g. 'chr1:1,000,000-1,100,000'.
+        output_path: Destination file. Extension sets format: .png, .svg, or .pdf.
+        dpi: Raster resolution. 300 for publication, 150 for preview.
+        theme: 'publication' for clean axes; 'default' for standard matplotlib.
+        width: Figure width in inches (default 12).
+        highlight_regions: Optional list of 'chrN:start-end' windows to shade
+            behind all tracks, e.g. to highlight a peak or regulatory element.
+    """
     try:
         from plotnado.figure import GenomicFigure
     except ImportError:
-        tool = get_tool("plotnado")
-        if tool and tool.container_image and _container_runtime():
-            code = (
-                f"import matplotlib; matplotlib.use('Agg'); import json; "
-                f"from plotnado.figure import GenomicFigure; "
-                f"tracks = json.loads({json.dumps(tracks)!r}); "
-                f"fig = GenomicFigure(width={width}, theme={theme!r}); "
-                f"[fig.add_track(t.pop('type'), **t) for t in [dict(s) for s in tracks]]; "
-                + (f"[fig.highlight(hr) for hr in {highlight_regions!r}]; " if highlight_regions else "")
-                + f"fig.save({output_path!r}, region={region!r}, dpi={dpi})"
-            )
-            _run_python_in_container(tool.container_image, code, output_path)
-            return f"Saved to {output_path}"
         raise RuntimeError(_install_hint("plotnado", "plotnado"))
 
     fig = GenomicFigure(width=width, theme=theme)
@@ -703,7 +483,13 @@ def plotnado_build(
 
 
 @mcp.tool(
-    description="Infer a plotnado YAML template from a list of track files.",
+    description=(
+        "Infer a plotnado YAML template from a list of track files. "
+        "Detects file types from extensions (.bw/.bigwig -> bigwig, .bed -> bed, "
+        ".narrowPeak -> narrowpeak, .bedpe -> links) and writes a ready-to-edit "
+        "template. Edit the template to adjust colours, heights, and order, "
+        "then pass it to plotnado_from_template."
+    ),
     annotations={"readOnlyHint": False, "destructiveHint": False},
 )
 def plotnado_init_template(
@@ -711,40 +497,30 @@ def plotnado_init_template(
     output_yaml: str,
     genome: str = "hg38",
 ) -> str:
-    """Detects file types (BigWig, BED, narrowPeak, etc.) and writes a ready-to-edit template."""
-    if shutil.which("plotnado"):
-        return _run(
-            ["plotnado", "init", "--output", output_yaml, "--genome", genome] + input_files
-        )
-    tool = get_tool("plotnado")
-    if tool and tool.container_image and _container_runtime():
-        return _run_python_in_container(
-            tool.container_image,
-            (
-                f"import subprocess, sys; "
-                f"r = subprocess.run(['plotnado', 'init', '--output', {output_yaml!r}, "
-                f"'--genome', {genome!r}] + {input_files!r}, capture_output=True, text=True); "
-                f"sys.stdout.write(r.stdout); sys.exit(r.returncode)"
-            ),
-            *input_files, output_yaml,
-        )
-    raise RuntimeError(_install_hint("plotnado", "plotnado"))
+    """
+    Args:
+        input_files: List of data file paths. Types are auto-detected from
+            extensions: .bw/.bigwig -> bigwig, .bed -> bed,
+            .narrowPeak -> narrowpeak, .bedpe -> links, .bigBed -> bed.
+        output_yaml: Path to write the generated YAML template. Edit this file
+            before passing it to plotnado_from_template.
+        genome: Genome build name for gene annotation guides
+            (e.g. 'hg38', 'mm10', 'dm6', 'hg19').
+    """
+    return _run(
+        ["plotnado", "init", "--output", output_yaml, "--genome", genome] + input_files
+    )
 
 
 # ─── QuantNado ───────────────────────────────────────────────────────────────
 
-def _quantnado_python(code: str, *file_paths: str) -> str:
-    """Run quantnado Python code via container, returning stdout."""
-    tool = get_tool("quantnado")
-    if tool and tool.container_image and _container_runtime():
-        return _run_python_in_container(tool.container_image, code, *file_paths)
-    raise RuntimeError(_install_hint("quantnado", "quantnado"))
-
-
 @mcp.tool(
     description=(
-        "Create a QuantNado Zarr dataset from BAM files. "
-        "Quantifies binned coverage and writes a Zarr v3 store."
+        "Create a QuantNado Zarr v3 dataset from a list of BAM files. "
+        "Quantifies binned coverage for all samples and writes a single Zarr store. "
+        "Each BAM becomes one sample; .bai index must exist alongside each BAM. "
+        "After creation, use quantnado_dataset_info to inspect sample names and "
+        "chromosomes, then quantnado_extract_region or quantnado_call_peaks."
     ),
     annotations={"readOnlyHint": False, "destructiveHint": False},
 )
@@ -755,16 +531,26 @@ def quantnado_create_dataset(
     bin_size: int = 200,
     n_workers: int = 4,
 ) -> str:
+    """
+    Args:
+        bam_files: List of absolute paths to sorted, indexed BAM files.
+            One sample per BAM. Each file must have a .bai index alongside it.
+        output_zarr: Path for the new Zarr v3 store directory (will be created).
+        chrom_sizes: Path to a 2-column TSV (chrom\\tsize). If None, chromosome
+            sizes are read from the BAM headers. Provide this when BAMs have
+            inconsistent headers across samples.
+        bin_size: Coverage bin width in bp. 200 is standard for ChIP-seq and
+            ATAC-seq. Use 10 for RNA-seq or when fine resolution is needed.
+        n_workers: Number of parallel workers for BAM processing. Scale to the
+            number of available CPU cores.
+
+    Returns:
+        Confirmation string with the output path and list of sample names ingested.
+    """
     try:
         from quantnado import QuantNado
     except ImportError:
-        code = (
-            f"from quantnado import QuantNado; "
-            f"qn = QuantNado.from_bam_files(bam_files={bam_files!r}, output_path={output_zarr!r}, "
-            f"chrom_sizes={chrom_sizes!r}, bin_size={bin_size}, n_workers={n_workers}); "
-            f"print(f'Dataset created at {output_zarr!r} with {{len(qn.samples)}} samples: {{qn.samples}}')"
-        )
-        return _quantnado_python(code, *bam_files, output_zarr)
+        raise RuntimeError(_install_hint("quantnado", "quantnado"))
 
     qn = QuantNado.from_bam_files(
         bam_files=bam_files,
@@ -781,16 +567,18 @@ def quantnado_create_dataset(
     annotations={"readOnlyHint": True, "destructiveHint": False},
 )
 def quantnado_dataset_info(dataset_path: str) -> dict[str, Any]:
+    """
+    Args:
+        dataset_path: Path to an existing QuantNado Zarr store directory.
+
+    Returns:
+        Dict with 'samples' (list of sample names), 'chromosomes', 'modalities',
+        'n_completed' (samples with complete data), and 'chromsizes' mapping.
+    """
     try:
         from quantnado import QuantNado
     except ImportError:
-        code = (
-            f"import json; from quantnado import QuantNado; "
-            f"qn = QuantNado.open_dataset({dataset_path!r}); "
-            f"print(json.dumps({{'samples': qn.samples, 'chromosomes': qn.chromosomes, "
-            f"'modalities': qn.modalities, 'n_completed': qn.n_completed, 'chromsizes': qn.chromsizes}}))"
-        )
-        return json.loads(_quantnado_python(code, dataset_path))
+        raise RuntimeError(_install_hint("quantnado", "quantnado"))
 
     qn = QuantNado.open_dataset(dataset_path)
     return {
@@ -803,7 +591,11 @@ def quantnado_dataset_info(dataset_path: str) -> dict[str, Any]:
 
 
 @mcp.tool(
-    description="Extract coverage signal for a genomic region and save to CSV.",
+    description=(
+        "Extract coverage signal for a genomic region across samples and save to CSV. "
+        "Region format: 'chrN:start-end' (e.g. 'chr1:1000000-2000000'). "
+        "Use quantnado_dataset_info to get valid sample names and chromosomes."
+    ),
     annotations={"readOnlyHint": False, "destructiveHint": False},
 )
 def quantnado_extract_region(
@@ -813,19 +605,21 @@ def quantnado_extract_region(
     normalise: Optional[str] = None,
     samples: Optional[list[str]] = None,
 ) -> str:
-    """region: 'chrN:start-end'. normalise: 'cpm' or 'rpkm'."""
+    """
+    Args:
+        dataset_path: Path to an existing QuantNado Zarr store.
+        region: Genomic window as 'chrN:start-end', e.g. 'chr1:1000000-2000000'.
+        output_csv: Path for the output CSV file (bins x samples).
+        normalise: Normalisation method. 'cpm' = counts per million (sequencing
+            depth correction), 'rpkm' = reads per kilobase per million (depth +
+            feature length correction), None = raw bin counts.
+        samples: List of sample names to include (from quantnado_dataset_info).
+            None returns all samples in the dataset.
+    """
     try:
         from quantnado import QuantNado
     except ImportError:
-        code = (
-            f"from quantnado import QuantNado; "
-            f"qn = QuantNado.open_dataset({dataset_path!r}); "
-            f"arr = qn.extract_region(region={region!r}, normalise={normalise!r}, "
-            f"samples={samples!r}, as_xarray=True); "
-            f"df = arr.to_pandas(); df.to_csv({output_csv!r}); "
-            f"print(f'Extracted {region!r} ({{arr.shape}}) to {output_csv!r}')"
-        )
-        return _quantnado_python(code, dataset_path, output_csv)
+        raise RuntimeError(_install_hint("quantnado", "quantnado"))
 
     qn = QuantNado.open_dataset(dataset_path)
     arr = qn.extract_region(region=region, normalise=normalise, samples=samples, as_xarray=True)
@@ -835,7 +629,16 @@ def quantnado_extract_region(
 
 
 @mcp.tool(
-    description="Call peaks from a QuantNado dataset and write results to BED.",
+    description=(
+        "Call peaks from a QuantNado dataset and write results to BED. "
+        "Choose method by assay type: "
+        "'quantile' -- fast threshold, sharp ChIP/ATAC peaks; "
+        "'seacr' -- Sparse Enrichment Analysis, designed for CUT&RUN/CUT&TAG low-background data; "
+        "'lanceotron' -- ML caller, handles broad and irregular peaks; "
+        "'macs3' -- classical ChIP-seq narrow peak calling; "
+        "'macs3_broad' -- broad domains (H3K27me3, H3K9me3); "
+        "'unet' / 'resnet' -- deep-learning models (require GPU extras)."
+    ),
     annotations={"readOnlyHint": False, "destructiveHint": False},
 )
 def quantnado_call_peaks(
@@ -845,22 +648,23 @@ def quantnado_call_peaks(
     sample_name: Optional[str] = None,
     blacklist_file: Optional[str] = None,
 ) -> str:
-    """method: 'quantile', 'seacr', 'lanceotron', 'macs3', 'macs3_broad', 'unet', or 'resnet'."""
+    """
+    Args:
+        dataset_path: Path to an existing QuantNado Zarr store.
+        output_bed: Path for the output BED file of called peaks.
+        method: Peak calling algorithm. Choose based on assay: 'quantile' or
+            'lanceotron' for ChIP/ATAC; 'seacr' for CUT&RUN/CUT&TAG;
+            'macs3' or 'macs3_broad' for classical ChIP; 'unet'/'resnet'
+            for deep-learning-based calling (GPU required).
+        sample_name: Name of the sample to call peaks for (from
+            quantnado_dataset_info). None calls peaks across all samples.
+        blacklist_file: Path to a BED file of regions to exclude from peak
+            calling (e.g. ENCODE blacklist for hg38). Optional but recommended.
+    """
     try:
         from quantnado import QuantNado
     except ImportError:
-        code = (
-            f"from pathlib import Path; from quantnado import QuantNado; "
-            f"qn = QuantNado.open_dataset({dataset_path!r}); "
-            f"peaks = qn.call_peaks(method={method!r}, sample_name={sample_name!r}, "
-            f"blacklist_file=Path({blacklist_file!r}) if {blacklist_file!r} else None); "
-            f"peaks.to_bed({output_bed!r}); "
-            f"print(f'Called peaks with {method!r}: {{len(peaks)}} peaks → {output_bed!r}')"
-        )
-        file_paths = [dataset_path, output_bed]
-        if blacklist_file:
-            file_paths.append(blacklist_file)
-        return _quantnado_python(code, *file_paths)
+        raise RuntimeError(_install_hint("quantnado", "quantnado"))
 
     qn = QuantNado.open_dataset(dataset_path)
     peaks = qn.call_peaks(
@@ -869,11 +673,14 @@ def quantnado_call_peaks(
         blacklist_file=Path(blacklist_file) if blacklist_file else None,
     )
     peaks.to_bed(output_bed)
-    return f"Called peaks with {method}: {len(peaks)} peaks → {output_bed}"
+    return f"Called peaks with {method}: {len(peaks)} peaks -> {output_bed}"
 
 
 @mcp.tool(
-    description="Generate a metaplot (average signal over genomic intervals) and save to PNG.",
+    description=(
+        "Generate a metaplot (average signal over genomic intervals) and save to PNG. "
+        "Useful for visualising signal enrichment at peaks, promoters, or other features."
+    ),
     annotations={"readOnlyHint": False, "destructiveHint": False},
 )
 def quantnado_metaplot(
@@ -883,17 +690,19 @@ def quantnado_metaplot(
     normalise: Optional[str] = "cpm",
     samples: Optional[list[str]] = None,
 ) -> str:
+    """
+    Args:
+        dataset_path: Path to an existing QuantNado Zarr store.
+        intervals_path: Path to a BED file of genomic intervals to average over
+            (e.g. peak calls or TSS regions).
+        output_png: Output path for the metaplot PNG image.
+        normalise: 'cpm', 'rpkm', or None. Defaults to 'cpm'.
+        samples: Sample names to include; None = all samples.
+    """
     try:
         from quantnado import QuantNado
     except ImportError:
-        code = (
-            f"import matplotlib; matplotlib.use('Agg'); from quantnado import QuantNado; "
-            f"qn = QuantNado.open_dataset({dataset_path!r}); "
-            f"fig = qn.metaplot(intervals_path={intervals_path!r}, normalise={normalise!r}, "
-            f"samples={samples!r}); "
-            f"fig.savefig({output_png!r}, dpi=150, bbox_inches='tight')"
-        )
-        return _quantnado_python(code, dataset_path, intervals_path, output_png)
+        raise RuntimeError(_install_hint("quantnado", "quantnado"))
 
     qn = QuantNado.open_dataset(dataset_path)
     fig = qn.metaplot(intervals_path=intervals_path, normalise=normalise, samples=samples)
@@ -902,7 +711,10 @@ def quantnado_metaplot(
 
 
 @mcp.tool(
-    description="Run PCA on sample coverage and save a scatter plot to PNG.",
+    description=(
+        "Run PCA on genome-wide sample coverage and save a scatter plot to PNG. "
+        "Useful for quality control and sample clustering."
+    ),
     annotations={"readOnlyHint": False, "destructiveHint": False},
 )
 def quantnado_pca(
@@ -911,16 +723,17 @@ def quantnado_pca(
     normalise: Optional[str] = "cpm",
     samples: Optional[list[str]] = None,
 ) -> str:
+    """
+    Args:
+        dataset_path: Path to an existing QuantNado Zarr store.
+        output_png: Output path for the PCA scatter plot PNG.
+        normalise: 'cpm', 'rpkm', or None. Defaults to 'cpm'.
+        samples: Sample names to include; None = all samples.
+    """
     try:
         from quantnado import QuantNado
     except ImportError:
-        code = (
-            f"import matplotlib; matplotlib.use('Agg'); from quantnado import QuantNado; "
-            f"qn = QuantNado.open_dataset({dataset_path!r}); "
-            f"fig = qn.pca(normalise={normalise!r}, samples={samples!r}); "
-            f"fig.savefig({output_png!r}, dpi=150, bbox_inches='tight')"
-        )
-        return _quantnado_python(code, dataset_path, output_png)
+        raise RuntimeError(_install_hint("quantnado", "quantnado"))
 
     qn = QuantNado.open_dataset(dataset_path)
     fig = qn.pca(normalise=normalise, samples=samples)
@@ -929,7 +742,10 @@ def quantnado_pca(
 
 
 @mcp.tool(
-    description="Plot coverage signal at a locus for all samples and save to PNG.",
+    description=(
+        "Plot coverage signal at a genomic locus for all (or selected) samples "
+        "and save to PNG. Useful for inspecting individual loci across samples."
+    ),
     annotations={"readOnlyHint": False, "destructiveHint": False},
 )
 def quantnado_locus_plot(
@@ -939,16 +755,18 @@ def quantnado_locus_plot(
     normalise: Optional[str] = "cpm",
     samples: Optional[list[str]] = None,
 ) -> str:
+    """
+    Args:
+        dataset_path: Path to an existing QuantNado Zarr store.
+        region: Genomic window as 'chrN:start-end', e.g. 'chr1:1000000-1010000'.
+        output_png: Output path for the locus plot PNG.
+        normalise: 'cpm', 'rpkm', or None. Defaults to 'cpm'.
+        samples: Sample names to include; None = all samples.
+    """
     try:
         from quantnado import QuantNado
     except ImportError:
-        code = (
-            f"import matplotlib; matplotlib.use('Agg'); from quantnado import QuantNado; "
-            f"qn = QuantNado.open_dataset({dataset_path!r}); "
-            f"fig = qn.locus_plot(region={region!r}, normalise={normalise!r}, samples={samples!r}); "
-            f"fig.savefig({output_png!r}, dpi=150, bbox_inches='tight')"
-        )
-        return _quantnado_python(code, dataset_path, output_png)
+        raise RuntimeError(_install_hint("quantnado", "quantnado"))
 
     qn = QuantNado.open_dataset(dataset_path)
     fig = qn.locus_plot(region=region, normalise=normalise, samples=samples)
@@ -960,7 +778,11 @@ def quantnado_locus_plot(
 
 @mcp.tool(
     description=(
-        "Generate a UCSC track hub from track files and optional metadata CSV. "
+        "Generate a UCSC track hub directory from BigWig/BigBed/BED track files. "
+        "Two input modes: (a) pass input_files directly for a flat hub; "
+        "(b) pass metadata_csv to drive grouping, colouring, and hierarchy. "
+        "The hub must be served over HTTP -- set url_prefix to the public base URL "
+        "of output_dir so UCSC can fetch the files. "
         "Either input_files or metadata_csv must be provided."
     ),
     annotations={"readOnlyHint": False, "destructiveHint": False},
@@ -978,6 +800,31 @@ def tracknado_create(
     url_prefix: str = "https://userweb.molbiol.ox.ac.uk",
     seqnado_layout: bool = False,
 ) -> str:
+    """
+    Args:
+        output_dir: Local directory where hub files will be written. Contains
+            hub.txt, genomes.txt, and trackDb.txt files after generation.
+        input_files: List of BigWig, BigBed, or BED file paths. Used when no
+            metadata_csv is provided. Track types are auto-detected from extensions.
+        metadata_csv: CSV file with a column matching track filenames/paths, plus
+            additional metadata columns (e.g. 'condition', 'antibody', 'cell_type').
+            These columns drive color_by, supergroup_by, and subgroup_by grouping.
+        genome: UCSC genome assembly name shown in the hub (e.g. 'hg38', 'mm10',
+            'dm6', 'hg19').
+        hub_name: Display name for the hub as shown in the UCSC browser track list.
+        hub_email: Contact email address included in hub.txt for UCSC registration.
+        color_by: Column name in metadata_csv whose values determine track colours.
+            Each unique value gets a distinct colour from a palette.
+        supergroup_by: List of metadata column names used to create a SuperTrack
+            hierarchy (top-level collapsible groups in UCSC).
+        subgroup_by: List of metadata column names used to create a CompositeTrack
+            matrix with filter controls in UCSC.
+        url_prefix: Base HTTP URL where output_dir will be publicly accessible.
+            UCSC fetches hub files via HTTP -- local paths will not work.
+            Example: 'https://userweb.molbiol.ox.ac.uk/public/username'.
+        seqnado_layout: If True, use SeqNado-specific seqnado_output/ directory
+            conventions when locating track files.
+    """
     args = [
         "tracknado", "create",
         "--output", output_dir,
@@ -1005,9 +852,29 @@ def tracknado_create(
 
 
 # ─── SeqNado ─────────────────────────────────────────────────────────────────
+#
+# Canonical SeqNado workflow:
+#   (optional) seqnado_download           -- fetch public FASTQ from GEO/SRA
+#   (optional) seqnado_build_genome       -- build and register a reference genome
+#   1. seqnado_list_assays                -- confirm assay name and available methods
+#   2. seqnado_list_genomes               -- confirm genome name is registered
+#   3. seqnado_generate_design            -- parse FASTQs -> metadata CSV
+#      [edit metadata CSV: fix sample_id and ip field names]
+#   4. seqnado_generate_config            -- generate config YAML
+#      [edit config YAML to tune pipeline settings]
+#   5. seqnado_run_pipeline dry_run=True  -- validate job graph
+#   6. seqnado_run_pipeline dry_run=False -- execute pipeline
+#   7. seqnado_pipeline_status            -- check completion
 
 @mcp.tool(
-    description="List all supported SeqNado assay types and pipeline options.",
+    description=(
+        "List all supported SeqNado assay types and available pipeline methods. "
+        "Use this first to confirm the correct assay name and supported methods "
+        "before calling seqnado_generate_design or seqnado_generate_config. "
+        "Canonical workflow: seqnado_list_assays -> seqnado_list_genomes -> "
+        "seqnado_generate_design -> seqnado_generate_config -> "
+        "seqnado_run_pipeline(dry_run=True) -> seqnado_run_pipeline(dry_run=False)."
+    ),
     annotations={"readOnlyHint": True, "destructiveHint": False},
 )
 def seqnado_list_assays() -> dict[str, Any]:
@@ -1039,10 +906,21 @@ def seqnado_list_assays() -> dict[str, Any]:
 
 
 @mcp.tool(
-    description="List all genome configurations registered in SeqNado for a given assay.",
+    description=(
+        "List all genome configurations registered in SeqNado for a given assay. "
+        "If the needed genome is not listed, run seqnado_build_genome to download "
+        "and register it. Registered genomes are stored at "
+        "~/.config/seqnado/genome_config.json."
+    ),
     annotations={"readOnlyHint": True, "destructiveHint": False},
 )
 def seqnado_list_genomes(assay: str = "chip") -> dict[str, Any]:
+    """
+    Args:
+        assay: Assay type to list genomes for. One of: chip, atac, rna, cat,
+            meth, snp, mcc, crispr. Different assays may require different genome
+            configurations (e.g. RNA-seq needs a STAR index; ChIP needs Bowtie2).
+    """
     try:
         from seqnado import Assay
         from seqnado.config.user_input import load_genome_configs
@@ -1059,8 +937,16 @@ def seqnado_list_genomes(assay: str = "chip") -> dict[str, Any]:
 
 @mcp.tool(
     description=(
-        "Generate a SeqNado design CSV from FASTQ file paths. "
-        "Parses Illumina-style filenames to extract sample names, replicates, and read pairs."
+        "SeqNado Step 1: Generate a design CSV from FASTQ file paths. "
+        "Parses Illumina-style filenames to extract sample names, replicates, "
+        "and read pairs. "
+        "IMPORTANT: After generation, edit the CSV directly to rename outputs -- "
+        "changing 'sample_id' renames sample directories in all pipeline outputs "
+        "without touching the original FASTQ files. For ChIP/CUT&RUN/TAG assays, "
+        "changing the 'ip' column renames the antibody label in BigWig and peak "
+        "output filenames ({sample_id}_{ip}.*). This is the correct way to clean "
+        "up messy sequencer filenames. "
+        "Output paths in the pipeline follow seqnado_output/{assay}/{sample_id}/{step}/."
     ),
     annotations={"readOnlyHint": False, "destructiveHint": False},
 )
@@ -1072,7 +958,36 @@ def seqnado_generate_design(
     group_by: Optional[str] = None,
     deseq2_pattern: Optional[str] = None,
 ) -> str:
-    """assay: 'chip', 'atac', 'rna', 'cat', 'meth', 'snp', 'mcc', 'crispr'."""
+    """
+    Args:
+        assay: Assay type. One of: chip, atac, rna, cat, meth, snp, mcc, crispr.
+            Use seqnado_list_assays to see all options.
+        fastq_files: List of FASTQ file paths. Illumina naming convention
+            '{sample}_{antibody}_R{1,2}_001.fastq.gz' is parsed automatically
+            to extract sample names and read pairing.
+        output_csv: Output path for the design CSV (convention: metadata_{assay}.csv
+            in the project working directory).
+        ip_to_control: Explicit antibody-to-control mapping as comma-separated
+            'IP1:ctrl1,IP2:ctrl2' pairs (e.g. 'H3K27ac:Input,H3K4me3:Input').
+            Use when multiple controls exist and auto-detection is ambiguous.
+        group_by: Metadata column name or regex pattern for grouping samples
+            into comparison groups.
+        deseq2_pattern: Regex to extract DESeq2 group label from filenames
+            (RNA-seq only). Example: '-(WT|KO)-' extracts 'WT' or 'KO'.
+            Common terms (control, treated, WT, KO, DMSO, vehicle) are
+            auto-detected without this argument.
+
+    Design CSV columns produced:
+        sample_id     -- unique sample name; EDIT THIS to rename all pipeline outputs
+        fastq_1       -- R1 FASTQ path (absolute)
+        fastq_2       -- R2 FASTQ path (absolute)
+        ip            -- antibody / IP target (ChIP/CAT/MCC); EDIT to rename in outputs
+        control       -- control sample name (IP assays only)
+        scaling_group -- normalisation group (default: 'default')
+        condition     -- biological condition (optional)
+        group         -- DESeq2 comparison group (RNA-seq)
+        deseq2        -- 0=reference, 1=treatment (RNA-seq DESeq2)
+    """
     try:
         from seqnado import Assay  # noqa: F401 — import check only
     except ImportError:
@@ -1095,102 +1010,80 @@ def seqnado_generate_design(
 
 @mcp.tool(
     description=(
-        "Generate a SeqNado workflow config YAML using the Python API. "
-        "The output file can be edited before passing to seqnado_run_pipeline."
+        "SeqNado Step 2: Generate a workflow config YAML non-interactively. "
+        "This wraps the documented CLI path: "
+        "`seqnado config ASSAY --no-interactive --no-make-dirs --render-options -o OUTPUT`. "
+        "Use this instead of plain `seqnado config`, because MCP agents cannot "
+        "answer terminal prompts. The generated YAML uses SeqNado defaults and "
+        "the first registered compatible genome; review and edit the YAML before "
+        "running the pipeline."
     ),
     annotations={"readOnlyHint": False, "destructiveHint": False},
 )
 def seqnado_generate_config(
     assay: str,
-    genome: str,
     output_yaml: str,
-    project_name: str = "seqnado_project",
-    pileup_method: str = "deeptools",
-    peak_calling_method: str = "lanceotron",
-    pcr_duplicates: str = "markdup",
-    bin_size: int = 10,
-    create_heatmaps: bool = False,
-    spikein_genome: Optional[str] = None,
-    run_deseq2: bool = False,
-    strandedness: int = 0,
-    ucsc_hub_dir: str = "seqnado_output/hub/",
-    ucsc_hub_email: str = "alastair.smith@ndcls.ox.ac.uk",
-    ucsc_hub_url: str = "https://userweb.molbiol.ox.ac.uk",
 ) -> str:
+    """
+    Args:
+        assay: Assay type. One of: chip, atac, rna, cat, meth, snp, mcc, crispr.
+        output_yaml: Output path for the config YAML. Convention: config_{assay}.yaml
+            in the project working directory.
+    """
     try:
-        from importlib import resources as _resources
-        from seqnado import (
-            Assay, PCRDuplicateHandling, PeakCallingMethod,
-            PileupMethod, QuantificationMethod,
-        )
-        from seqnado.config.user_input import (
-            build_default_assay_config, load_genome_configs, render_config,
-        )
-        from seqnado.config.configs import (
-            BigwigConfig, PCRDuplicatesConfig, PeakCallingConfig, ProjectConfig,
-            RNAQuantificationConfig, SpikeInConfig, UCSCHubConfig,
-        )
+        from seqnado import Assay  # noqa: F401
     except ImportError:
         raise RuntimeError(_install_hint("seqnado", "seqnado"))
 
-    assay_enum = Assay.from_clean_name(assay.lower())
-    genomes = load_genome_configs(assay_enum)
-    if genome not in genomes:
+    assay_clean = assay.lower()
+    if assay_clean in {"mcc", "multiomics"}:
         raise ValueError(
-            f"Genome '{genome}' not found. Available: {list(genomes)}. "
-            "Run seqnado_list_genomes to see options."
-        )
-    genome_cfg = genomes[genome]
-    assay_cfg = build_default_assay_config(assay_enum, genome_cfg)
-    if assay_cfg is None:
-        raise ValueError(f"Could not build default config for assay '{assay}'")
-
-    assay_cfg.bigwigs = BigwigConfig(
-        pileup_method=[PileupMethod(pileup_method)], binsize=bin_size,
-    )
-    assay_cfg.create_heatmaps = create_heatmaps
-    assay_cfg.ucsc_hub = UCSCHubConfig(
-        directory=ucsc_hub_dir, genome=genome, email=ucsc_hub_email,
-        genome_name=genome, url=ucsc_hub_url,
-    )
-    if hasattr(assay_cfg, "peak_calling") and assay_cfg.peak_calling is not None:
-        assay_cfg.peak_calling = PeakCallingConfig(
-            method=[PeakCallingMethod(peak_calling_method)], consensus_counts=False,
-        )
-    if hasattr(assay_cfg, "spikein") and spikein_genome:
-        spikein_genomes = load_genome_configs(assay_enum)
-        if spikein_genome in spikein_genomes:
-            assay_cfg.spikein = SpikeInConfig(genome=spikein_genomes[spikein_genome])
-    if hasattr(assay_cfg, "rna_quantification") and assay_cfg.rna_quantification is not None:
-        assay_cfg.rna_quantification = RNAQuantificationConfig(
-            method=QuantificationMethod.FEATURE_COUNTS,
-            run_deseq2=run_deseq2,
-            strandedness=strandedness,
+            f"SeqNado non-interactive config generation does not support '{assay}'. "
+            "Run the interactive CLI outside MCP or create/edit the YAML manually."
         )
 
-    from seqnado._version import __version__ as seqnado_version
-    pkg_root = _resources.files("seqnado")
-    template_path = pkg_root / "config" / "templates" / f"config_{assay.lower()}.yaml"
-    pcr_dup_cfg = PCRDuplicatesConfig(strategy=PCRDuplicateHandling(pcr_duplicates))
-    from seqnado.config.user_input import SeqnadoConfig  # type: ignore[attr-defined]
-    workflow_cfg = SeqnadoConfig(
-        project=ProjectConfig(project_name=project_name),
-        pcr_duplicates=pcr_dup_cfg,
-        **assay_cfg.model_dump(),
-    )
-    render_config(
-        template=Path(str(template_path)),
-        workflow_config=workflow_cfg,
-        outfile=Path(output_yaml),
-        seqnado_version=seqnado_version,
-    )
-    return f"Config written to {output_yaml}"
+    args = [
+        "seqnado", "config", assay_clean,
+        "--no-interactive",
+        "--no-make-dirs",
+        "--render-options",
+        "-o", output_yaml,
+    ]
+    result = subprocess.run(args, capture_output=True, text=True)
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"seqnado config failed (exit {result.returncode}):\n"
+            f"STDOUT:\n{result.stdout[-3000:]}\n"
+            f"STDERR:\n{result.stderr[-3000:]}"
+        )
+
+    output_path = Path(output_yaml)
+    if not output_path.exists():
+        raise RuntimeError(
+            "seqnado config exited successfully but did not create "
+            f"the expected file: {output_yaml}"
+        )
+
+    messages = [f"Config written to {output_yaml} using non-interactive SeqNado defaults."]
+    if result.stdout.strip():
+        messages.append(f"stdout:\n{result.stdout.strip()[-1000:]}")
+    if result.stderr.strip():
+        messages.append(f"stderr:\n{result.stderr.strip()[-1000:]}")
+    return "\n\n".join(messages)
 
 
 @mcp.tool(
     description=(
-        "Run (or dry-run) a SeqNado Snakemake pipeline. "
-        "Always dry_run=True first to preview the job graph before committing."
+        "SeqNado Step 3: Run (or dry-run) a SeqNado Snakemake pipeline. "
+        "ALWAYS call with dry_run=True first to preview the job graph and validate "
+        "inputs before committing to a full run. "
+        "The pipeline reads metadata_{assay}.csv and config_{assay}.yaml from "
+        "working_dir and writes all outputs to seqnado_output/ there. "
+        "Execution profiles: 'le' (local+conda envs, default), "
+        "'lc' (local+containers), 'ls' (local+Singularity), "
+        "'ss' (SLURM+Singularity for HPC), 't' (testing). "
+        "Pass ['--unlock'] in extra_snakemake_args if the pipeline is locked "
+        "from a previous interrupted run."
     ),
     annotations={"readOnlyHint": False, "destructiveHint": False},
 )
@@ -1204,7 +1097,28 @@ def seqnado_run_pipeline(
     profile: Optional[str] = None,
     extra_snakemake_args: Optional[list[str]] = None,
 ) -> str:
-    """dry_run defaults to True — call with dry_run=False only after reviewing the plan."""
+    """
+    Args:
+        assay: Assay type. One of: chip, atac, rna, cat, meth, snp, mcc, crispr.
+        config_yaml: Path to the YAML generated by seqnado_generate_config.
+            Review and edit it before passing here.
+        working_dir: Project directory that contains the design CSV
+            (metadata_{assay}.csv) and where seqnado_output/ will be created.
+        cores: CPU cores for local execution. Ignored by SLURM profiles ('ss')
+            which schedule jobs via the cluster.
+        dry_run: If True (default), preview the Snakemake job graph without
+            executing any steps. Always run with True first, then set False
+            to execute after reviewing the plan.
+        targets: List of specific Snakemake rule names or output file paths to
+            run, limiting execution to those targets only. None runs all rules.
+        profile: Snakemake execution profile. 'le' = local+conda (default),
+            'lc' = local+containers, 'ls' = local+Singularity,
+            'ss' = SLURM+Singularity (HPC), 't' = testing preset.
+        extra_snakemake_args: Additional flags passed verbatim to Snakemake.
+            Common examples: ['--unlock'] to release a locked directory,
+            ['--rerun-incomplete'] to retry unfinished jobs,
+            ['--forceall'] to re-run all steps regardless of completion status.
+    """
     try:
         from seqnado import Assay  # noqa: F401
     except ImportError:
@@ -1243,6 +1157,11 @@ def seqnado_run_pipeline(
     annotations={"readOnlyHint": True, "destructiveHint": False},
 )
 def seqnado_pipeline_status(working_dir: str) -> dict[str, Any]:
+    """
+    Args:
+        working_dir: Project directory where the pipeline was run. Inspects
+            the seqnado_output/ subdirectory for completed output files.
+    """
     output_dir = Path(working_dir) / "seqnado_output"
     if not output_dir.exists():
         return {"status": "not_started", "output_dir": str(output_dir)}
@@ -1275,6 +1194,13 @@ def seqnado_pipeline_status(working_dir: str) -> dict[str, Any]:
     annotations={"readOnlyHint": True, "destructiveHint": False},
 )
 def seqnado_validate_design(design_csv: str, assay: str) -> dict[str, Any]:
+    """
+    Args:
+        design_csv: Path to the design CSV generated by seqnado_generate_design.
+        assay: Assay type the design was created for (chip, atac, rna, etc.).
+            Used to determine which columns are required (e.g. ip/control for
+            IP-based assays like chip, cat).
+    """
     try:
         import pandas as pd
         from seqnado import Assay
@@ -1302,6 +1228,139 @@ def seqnado_validate_design(design_csv: str, assay: str) -> dict[str, Any]:
         "n_samples": len(df),
         "samples": df["sample_id"].tolist() if "sample_id" in df.columns else [],
     }
+
+
+@mcp.tool(
+    description=(
+        "Download public FASTQ files from GEO/SRA using an ENA metadata TSV. "
+        "Obtain the TSV from the ENA Browser: search by project accession "
+        "(e.g. PRJNA1234567 or ERP123456) then click 'Download report' as TSV. "
+        "Downloaded files are named '{library_name}-{sample_title}_R1.fastq.gz' "
+        "(paired-end) or '{library_name}-{sample_title}.fastq.gz' (single-end). "
+        "Optionally auto-generates a SeqNado design CSV after download. "
+        "Requires sra-tools (prefetch + fasterq-dump) in PATH. "
+        "Always use dry_run=True first to preview the download plan."
+    ),
+    annotations={"readOnlyHint": False, "destructiveHint": False},
+)
+def seqnado_download(
+    metadata_tsv: str,
+    output_dir: str = "fastqs",
+    assay: Optional[str] = None,
+    design_output: Optional[str] = None,
+    cores: int = 4,
+    preset: str = "le",
+    dry_run: bool = True,
+) -> str:
+    """
+    Args:
+        metadata_tsv: Path to an ENA file report TSV. Required columns:
+            'run_accession' (e.g. SRR123456), 'sample_title' (sample name),
+            'library_name' (e.g. GSM identifier), 'library_layout' (PAIRED or SINGLE).
+            Download from ENA Browser: search project accession -> Download report -> TSV.
+        output_dir: Directory where FASTQ files will be written. Created if it
+            does not exist. Defaults to 'fastqs'.
+        assay: If provided, auto-generates a SeqNado design CSV after download.
+            One of: chip, atac, rna, cat, meth, snp, mcc, crispr.
+        design_output: Output path for the auto-generated design CSV.
+            Defaults to 'metadata_{assay}.csv' in the current directory.
+        cores: Number of parallel download jobs (runs prefetch + fasterq-dump).
+        preset: Snakemake execution profile. 'le' = local+conda (default),
+            'ls' = local+Singularity, 'ss' = SLURM+Singularity (HPC).
+        dry_run: If True (default), preview the download plan without fetching
+            any files. Review before setting False.
+    """
+    try:
+        from seqnado import Assay  # noqa: F401
+    except ImportError:
+        raise RuntimeError(_install_hint("seqnado", "seqnado"))
+
+    args = [
+        "seqnado", "download",
+        metadata_tsv,
+        "--outdir", output_dir,
+        "--cores", str(cores),
+        "--preset", preset,
+    ]
+    if assay:
+        args += ["--assay", assay]
+    if design_output:
+        args += ["--design-output", design_output]
+    if dry_run:
+        args.append("--dry-run")
+
+    result = subprocess.run(args, capture_output=True, text=True)
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"seqnado download failed (exit {result.returncode}):\n"
+            f"STDOUT:\n{result.stdout[-3000:]}\n"
+            f"STDERR:\n{result.stderr[-3000:]}"
+        )
+    return result.stdout.strip() or "Download completed."
+
+
+@mcp.tool(
+    description=(
+        "Download a reference genome from UCSC and build all required indices: "
+        "Bowtie2, STAR, samtools FAI, chromosome sizes, ENCODE blacklist, RefSeq GTF. "
+        "On completion the genome is automatically registered at "
+        "~/.config/seqnado/genome_config.json and immediately available via "
+        "seqnado_list_genomes. Multiple genomes and spike-in composite builds are "
+        "supported in a single call. STAR indexing requires at least 8 GB RAM. "
+        "Always use dry_run=True first to preview the build DAG."
+    ),
+    annotations={"readOnlyHint": False, "destructiveHint": False},
+)
+def seqnado_build_genome(
+    genome_names: list[str],
+    output_dir: str,
+    spikein: Optional[str] = None,
+    cores: int = 4,
+    preset: str = "le",
+    dry_run: bool = True,
+) -> str:
+    """
+    Args:
+        genome_names: List of UCSC genome assembly identifiers to download and
+            build. Examples: ['hg38'], ['hg38', 'mm39'], ['hg38', 'mm39', 'dm6'].
+        output_dir: Directory where genome files will be written. The path is
+            registered in ~/.config/seqnado/genome_config.json after a successful
+            build so seqnado pipelines can find it automatically.
+        spikein: Optional spike-in genome name to build a composite combined
+            index alongside the primary genome (e.g. 'dm6' for Drosophila
+            spike-in normalisation). Must be a valid UCSC genome name.
+        cores: CPU cores for parallel index building. STAR genome generation
+            requires at least 8 GB RAM; scale cores to available memory.
+        preset: Snakemake execution profile. 'le' = local+conda (default),
+            'ls' = local+Singularity, 'ss' = SLURM+Singularity (HPC).
+        dry_run: If True (default), preview the build DAG without downloading
+            or indexing anything. Review the plan before setting False.
+    """
+    try:
+        from seqnado import Assay  # noqa: F401
+    except ImportError:
+        raise RuntimeError(_install_hint("seqnado", "seqnado"))
+
+    args = [
+        "seqnado", "genomes", "build",
+        "--name", ",".join(genome_names),
+        "--outdir", output_dir,
+        "--cores", str(cores),
+        "--preset", preset,
+    ]
+    if spikein:
+        args += ["--spikein", spikein]
+    if dry_run:
+        args.append("--dry-run")
+
+    result = subprocess.run(args, capture_output=True, text=True)
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"seqnado genomes build failed (exit {result.returncode}):\n"
+            f"STDOUT:\n{result.stdout[-3000:]}\n"
+            f"STDERR:\n{result.stderr[-3000:]}"
+        )
+    return result.stdout.strip() or f"Genome build completed for {genome_names}."
 
 
 # ─── Entry point ─────────────────────────────────────────────────────────────

@@ -73,10 +73,14 @@ def test_python_compatible_known_cap():
     assert isinstance(result, bool)
 
 
-def test_library_only_tools_have_no_cli_command():
+def test_bamnado_has_cli_command():
     bamnado = get_tool("bamnado")
+    assert bamnado is not None
+    assert bamnado.cli_command == "bamnado"
+
+
+def test_library_only_tools_have_no_cli_command():
     mccnado = get_tool("mccnado")
-    assert bamnado is not None and bamnado.cli_command is None
     assert mccnado is not None and mccnado.cli_command is None
 
 
