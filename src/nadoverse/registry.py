@@ -18,6 +18,7 @@ class NadoTool:
     repo_url: str
     docs_url: Optional[str]
     min_python: str
+    container_image: Optional[str] = None
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -81,6 +82,7 @@ REGISTRY: list[NadoTool] = [
         repo_url="https://github.com/Milne-Group/PlotNado",
         docs_url=None,
         min_python="3.12",
+        container_image="ghcr.io/milne-group/plotnado:latest",
     ),
     NadoTool(
         name="TrackNado",
@@ -102,16 +104,17 @@ REGISTRY: list[NadoTool] = [
         description=(
             "High-performance BAM processing (Rust core, PyO3 bindings): "
             "parallel coverage/pileup, flexible read filtering, signal normalisation. "
-            "Library only — no standalone CLI."
+            "Provides both a standalone CLI (`bamnado`) and Python bindings."
         ),
         pypi_name="bamnado",
         install_extra="bamnado",
-        cli_command=None,
+        cli_command="bamnado",
         input_types=["BAM"],
         output_types=["bigWig", "coverage arrays"],
         repo_url="https://github.com/Milne-Group/BamNado",
         docs_url=None,
         min_python="3.10",
+        container_image="ghcr.io/milne-group/bamnado:latest",
     ),
     NadoTool(
         name="QuantNado",
@@ -128,6 +131,7 @@ REGISTRY: list[NadoTool] = [
         repo_url="https://github.com/Milne-Group/QuantNado",
         docs_url=None,
         min_python="3.12",
+        container_image="ghcr.io/milne-group/quantnado:latest",
     ),
     NadoTool(
         name="MCCNado",
@@ -143,6 +147,7 @@ REGISTRY: list[NadoTool] = [
         repo_url="https://github.com/alsmith151/MCCNado",
         docs_url=None,
         min_python="3.10",
+        container_image="ghcr.io/alsmith151/mccnado:latest",
     ),
     NadoTool(
         name="TabNado",
@@ -159,6 +164,7 @@ REGISTRY: list[NadoTool] = [
         repo_url="https://github.com/Milne-Group/TabNado",
         docs_url=None,
         min_python="3.12",
+        container_image="ghcr.io/milne-group/tabnado:latest",
     ),
 ]
 
