@@ -65,3 +65,52 @@ def test_seqnado_generate_config_rejects_prompt_only_modes(monkeypatch, tmp_path
 
     with pytest.raises(ValueError, match="does not support 'mcc'"):
         mcp_server.seqnado_generate_config("mcc", str(tmp_path / "config_mcc.yaml"))
+
+
+def test_bamnado_bam_coverage_invokes_cli(monkeypatch, tmp_path):
+    mcp_server = _import_mcp_server(monkeypatch)
+    monkeypatch.setitem(sys.modules, "bamnado", types.SimpleNamespace())
+    calls = []
+
+    def fake_run(args):
+        calls.append(args)
+        return ""
+
+    monkeypatch.setattr(mcp_server, "_run", fake_run)
+    output = tmp_path / "coverage.bedgraph"
+
+    result = mcp_server.bamnado_bam_coverage(
+        "/data/sample.bam",
+        str(output),
+        bin_size=50,
+        normalize="raw",
+        fragment_counts=True,
+        min_mapq=30,
+    )
+
+    assert calls == [
+        [
+            "bamnado",
+            "bam-coverage",
+            "--bam",
+            "/data/sample.bam",
+            "--output",
+            str(output),
+            "--normalize",
+            "raw",
+            "--threads",
+            "6",
+            "--strand",
+            "both",
+            "--min-mapq",
+            "30",
+            "--min-length",
+            "20",
+            "--max-length",
+            "1000",
+            "--bin-size",
+            "50",
+            "--fragment-counts",
+        ]
+    ]
+    assert result == f"Coverage written to {output}"

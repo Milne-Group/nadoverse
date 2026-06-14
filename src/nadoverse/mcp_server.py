@@ -141,6 +141,106 @@ def bamnado_get_signal(
     }
 
 
+@mcp.tool(
+    description=(
+        "Generate a bedGraph or BigWig coverage track from one sorted, indexed BAM file "
+        "using `bamnado bam-coverage`. Output format is inferred from output_path: "
+        ".bedgraph/.bdg writes bedGraph; .bw/.bigwig writes BigWig. "
+        "For ATAC-seq, set fragment_counts=True and optionally use "
+        "min_fragment_len/max_fragment_len to restrict fragment classes."
+    ),
+    annotations={"readOnlyHint": False, "destructiveHint": False},
+)
+def bamnado_bam_coverage(
+    bam_path: str,
+    output_path: str,
+    bin_size: Optional[int] = 50,
+    normalize: str = "raw",
+    scale_factor: Optional[float] = None,
+    fragment_counts: bool = False,
+    ignore_scaffolds: bool = False,
+    threads: int = 6,
+    strand: str = "both",
+    proper_pairs: bool = False,
+    min_mapq: int = 20,
+    min_length: int = 20,
+    max_length: int = 1000,
+    min_fragment_len: Optional[int] = None,
+    max_fragment_len: Optional[int] = None,
+    blacklist: Optional[str] = None,
+    barcode_allowlist: Optional[str] = None,
+    read_group: Optional[str] = None,
+    tag: Optional[str] = None,
+    tag_value: Optional[str] = None,
+) -> str:
+    """
+    Args:
+        bam_path: Path to a sorted, indexed BAM file.
+        output_path: Destination bedGraph or BigWig path. Extension controls format.
+        bin_size: Coverage bin width in bp. Use 10-50 for fine signal, 100+ for quick tests.
+        normalize: Signal normalisation: raw, cpm, or rpkm.
+        scale_factor: Optional multiplier applied to final signal values.
+        fragment_counts: Count paired-end fragment spans instead of individual reads.
+        ignore_scaffolds: Skip scaffold/unplaced chromosomes.
+        threads: Threads for BigWig writing.
+        strand: both, forward, or reverse.
+        proper_pairs: Keep only properly paired reads.
+        min_mapq: Minimum mapping quality.
+        min_length: Minimum read length.
+        max_length: Maximum read length.
+        min_fragment_len: Minimum paired-end fragment length.
+        max_fragment_len: Maximum paired-end fragment length.
+        blacklist: Optional BED file of regions to exclude.
+        barcode_allowlist: Optional file of barcodes to retain, one per line.
+        read_group: Optional read group to retain.
+        tag: Optional SAM tag to filter on.
+        tag_value: Required tag value when tag is set.
+    """
+    try:
+        import bamnado  # noqa: F401
+    except ImportError:
+        raise RuntimeError(_install_hint("bamnado", "bamnado"))
+
+    args = [
+        "bamnado", "bam-coverage",
+        "--bam", bam_path,
+        "--output", output_path,
+        "--normalize", normalize,
+        "--threads", str(threads),
+        "--strand", strand,
+        "--min-mapq", str(min_mapq),
+        "--min-length", str(min_length),
+        "--max-length", str(max_length),
+    ]
+    if bin_size is not None:
+        args += ["--bin-size", str(bin_size)]
+    if scale_factor is not None:
+        args += ["--scale-factor", str(scale_factor)]
+    if fragment_counts:
+        args.append("--fragment-counts")
+    if ignore_scaffolds:
+        args.append("--ignore-scaffolds")
+    if proper_pairs:
+        args.append("--proper-pairs")
+    if min_fragment_len is not None:
+        args += ["--min-fragment-len", str(min_fragment_len)]
+    if max_fragment_len is not None:
+        args += ["--max-fragment-len", str(max_fragment_len)]
+    if blacklist:
+        args += ["--blacklist", blacklist]
+    if barcode_allowlist:
+        args += ["--barcode-allowlist", barcode_allowlist]
+    if read_group:
+        args += ["--read-group", read_group]
+    if tag:
+        args += ["--tag", tag]
+    if tag_value:
+        args += ["--tag-value", tag_value]
+
+    output = _run(args)
+    return output or f"Coverage written to {output_path}"
+
+
 # ─── MCCNado ─────────────────────────────────────────────────────────────────
 #
 # MCC pipeline order:
