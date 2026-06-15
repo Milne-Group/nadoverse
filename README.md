@@ -124,17 +124,79 @@ Add this server to `~/.claude/mcp.json`:
 }
 ```
 
-Core MCP tools:
+Available MCP tools:
 
 | Tool | Description |
 |------|-------------|
 | `list_nado_tools` | Show install status, versions, CLI entrypoints, and input/output types |
+
+### BamNado MCP Tools
+
+| Tool | Description |
+|------|-------------|
 | `bamnado_get_signal` | Extract per-bin coverage for one chromosome from a BAM |
 | `bamnado_bam_coverage` | Generate bedGraph or BigWig coverage from one BAM |
 | `bamnado_multi_bam_coverage` | Merge coverage from multiple BAM files |
 | `bamnado_bigwig_compare` | Compare two BigWig files bin by bin |
+| `bamnado_bigwig_aggregate` | Aggregate multiple BigWig files with sum, mean, median, max, or min |
+| `bamnado_collapse_bedgraph` | Collapse adjacent equal-score bedGraph bins |
+| `bamnado_split` | Split or filter a BAM with BamNado read filters |
+| `bamnado_split_exogenous` | Split endogenous and exogenous reads by reference-name prefix |
+| `bamnado_modify` | Filter and adjust reads, including optional Tn5 shifting |
+| `bamnado_bigwig_infer_scale` | Infer scaling factors and library size from CPM/RPKM-normalised BigWig files |
+
+### MCCNado MCP Tools
+
+| Tool | Description |
+|------|-------------|
+| `mccnado_deduplicate_fastq` | Deduplicate paired-end FASTQ reads before alignment |
+| `mccnado_annotate_bam` | Annotate aligned MCC BAM files with viewpoint/on-capture/reporter tags |
+| `mccnado_deduplicate_bam` | Remove PCR duplicates from annotated MCC BAM files |
+| `mccnado_split_viewpoint_reads` | Split deduplicated MCC BAM files by viewpoint |
+| `mccnado_identify_ligation_junctions` | Write per-viewpoint cooler files from MCC ligation junctions |
+| `mccnado_extract_ligation_stats` | Generate MCC ligation-junction statistics |
+| `mccnado_combine_coolers` | Merge per-viewpoint cooler files into one multi-viewpoint cooler |
+
+### PlotNado MCP Tools
+
+| Tool | Description |
+|------|-------------|
 | `plotnado_from_template` | Render genomic figures from PlotNado templates |
+| `plotnado_from_igv_session` | Render figures from IGV session XML files |
+| `plotnado_build` | Build a plot directly from track inputs and region arguments |
+| `plotnado_init_template` | Generate a starter PlotNado YAML template |
+
+### QuantNado MCP Tools
+
+| Tool | Description |
+|------|-------------|
+| `quantnado_create_dataset` | Create a QuantNado dataset from BAM or BigWig files |
+| `quantnado_dataset_info` | Inspect dataset metadata, samples, and intervals |
+| `quantnado_extract_region` | Extract signal values for a genomic region |
+| `quantnado_call_peaks` | Call peaks with quantile or SEACR-style methods |
+| `quantnado_metaplot` | Generate aggregate signal profiles around genomic features |
+| `quantnado_pca` | Run PCA over a QuantNado dataset |
+| `quantnado_locus_plot` | Plot signal over one locus |
+
+### TrackNado MCP Tools
+
+| Tool | Description |
+|------|-------------|
+| `tracknado_create` | Create a UCSC track hub from sequencing output files |
+
+### SeqNado MCP Tools
+
+| Tool | Description |
+|------|-------------|
+| `seqnado_list_assays` | List supported SeqNado assay types |
+| `seqnado_list_genomes` | List available genomes for a SeqNado assay |
+| `seqnado_generate_design` | Generate a design CSV template |
 | `seqnado_generate_config` | Generate non-interactive SeqNado config files where supported |
+| `seqnado_run_pipeline` | Run or dry-run a SeqNado pipeline command |
+| `seqnado_pipeline_status` | Inspect output directories for common pipeline outputs |
+| `seqnado_validate_design` | Validate a SeqNado design CSV |
+| `seqnado_download` | Download public sequencing data with SeqNado helpers |
+| `seqnado_build_genome` | Build a genome resource for SeqNado workflows |
 
 The MCP server imports tool packages lazily. This means `nadoverse-mcp` can start when only a subset of extras is installed, and missing tools report their install command when called.
 
