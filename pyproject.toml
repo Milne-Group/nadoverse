@@ -28,7 +28,7 @@ tracknado = ["tracknado>=0.3.1"]
 bamnado   = ["bamnado>=0.6.1"]
 quantnado = ["quantnado>=0.4.8"]
 mccnado   = ["mccnado>=0.1.5"]
-tabnado   = ["tabnado>=0.1.0"]
+tabnado   = ["TabNado>=0.1.0"]
 mcp       = ["fastmcp>=3.0"]
 all       = [
     "nadoverse[seqnado,plotnado,tracknado,bamnado,quantnado,mccnado,tabnado]",
