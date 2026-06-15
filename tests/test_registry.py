@@ -79,6 +79,14 @@ def test_bamnado_has_cli_command():
     assert bamnado.cli_command == "bamnado"
 
 
+def test_regulonado_has_cli_command():
+    regulonado = get_tool("regulonado")
+    assert regulonado is not None
+    assert regulonado.name == "ReguloNado"
+    assert regulonado.cli_command == "regulonado"
+    assert "bigWig" in regulonado.input_types
+
+
 def test_library_only_tools_have_no_cli_command():
     mccnado = get_tool("mccnado")
     assert mccnado is not None and mccnado.cli_command is None

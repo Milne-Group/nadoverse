@@ -102,6 +102,24 @@ def tab(ctx: typer.Context) -> None:
     _dispatch(tool, ctx.args)
 
 
+@app.command(
+    "regulo",
+    help="Run ReguloNado sequence-to-function model training (requires Python <3.13).",
+    context_settings={"allow_extra_args": True, "ignore_unknown_options": True},
+)
+def regulo(ctx: typer.Context) -> None:
+    from nadoverse.registry import get_tool
+    tool = get_tool("regulonado")
+    if not tool.python_compatible():
+        console.print(
+            f"[bold yellow]Warning:[/bold yellow] ReguloNado requires Python <3.13 "
+            f"(running {sys.version_info.major}.{sys.version_info.minor}).\n"
+            "See https://github.com/alsmith151/ReguloNado for updates.",
+        )
+        raise typer.Exit(1)
+    _dispatch(tool, ctx.args)
+
+
 # ---------------------------------------------------------------------------
 # nado doctor
 # ---------------------------------------------------------------------------

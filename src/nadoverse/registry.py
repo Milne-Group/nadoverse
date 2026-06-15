@@ -44,6 +44,7 @@ class NadoTool:
         """False if running Python version exceeds this tool's known upper cap."""
         caps = {
             "tabnado": (3, 13),  # tabnado requires <3.13
+            "regulonado": (3, 13),  # regulonado requires <3.13
         }
         cap = caps.get(self.pypi_name.lower())
         if cap is None:
@@ -165,6 +166,22 @@ REGISTRY: list[NadoTool] = [
         docs_url=None,
         min_python="3.12",
         container_image="ghcr.io/milne-group/tabnado:latest",
+    ),
+    NadoTool(
+        name="ReguloNado",
+        description=(
+            "Builds Hugging Face Arrow datasets from FASTA, BED, and BigWig inputs "
+            "and trains large sequence-to-function models such as Borzoi and "
+            "Enformer on those datasets."
+        ),
+        pypi_name="regulonado",
+        install_extra="regulonado",
+        cli_command="regulonado",
+        input_types=["FASTA", "BED", "bigWig", "Hydra config"],
+        output_types=["Arrow dataset", "model checkpoint", "training metrics"],
+        repo_url="https://github.com/alsmith151/ReguloNado",
+        docs_url=None,
+        min_python="3.11",
     ),
 ]
 

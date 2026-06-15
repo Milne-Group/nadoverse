@@ -30,7 +30,7 @@ def test_doctor_shows_tool_names():
         text=True,
     )
     output = result.stdout + result.stderr
-    for name in ("SeqNado", "PlotNado", "TrackNado", "QuantNado", "TabNado"):
+    for name in ("SeqNado", "PlotNado", "TrackNado", "QuantNado", "TabNado", "ReguloNado"):
         assert name in output, f"{name} missing from nado doctor output"
 
 
@@ -40,7 +40,7 @@ def test_nado_help_exits_zero():
 
 
 def test_subcommand_help_exits_zero():
-    for cmd in ("seq", "plot", "track", "quant", "tab"):
+    for cmd in ("seq", "plot", "track", "quant", "tab", "regulo"):
         result = subprocess.run(
             ["nado", cmd, "--help"],
             capture_output=True,

@@ -20,12 +20,14 @@ nado doctor
 | [QuantNado](https://github.com/Milne-Group/QuantNado) | `quantnado` | Zarr-backed genomic signal quantification and peak calling | `nado quant` |
 | [MCCNado](https://github.com/alsmith151/MCCNado) | `mccnado` | Micro-Capture-C processing utilities | library/MCP |
 | [TabNado](https://github.com/Milne-Group/TabNado) | `tabnado` | TF-binding prediction from epigenomic cofactors | `nado tab` |
+| [ReguloNado](https://github.com/alsmith151/ReguloNado) | `regulonado` | Dataset building and training for large sequence-to-function models from FASTA, BED, and BigWig inputs | `nado regulo` |
 
 ## Requirements
 
 - Python 3.12 or newer for `nadoverse`.
 - Python 3.12 is the safest environment for all current extras.
 - TabNado currently requires Python `<3.13`; `nado doctor` reports this compatibility status.
+- ReguloNado currently requires Python `<3.13`; `nado doctor` reports this compatibility status.
 
 ## Install With uv
 
@@ -42,10 +44,11 @@ Install the main published toolset:
 uv pip install "nadoverse[all]"
 ```
 
-`all` excludes TabNado because TabNado currently requires Python `<3.13` and its published dependency constraints are unsatisfiable on macOS x86_64. Install it separately on a compatible Python 3.12 environment:
+`all` excludes TabNado and ReguloNado because they currently require Python `<3.13`; ReguloNado is also installed directly from GitHub and pulls large model-training dependencies. Install them separately on a compatible Python 3.12 environment:
 
 ```bash
 uv pip install "nadoverse[tabnado]"
+uv pip install "nadoverse[regulonado]"
 ```
 
 Install the MCP server support:
@@ -82,11 +85,12 @@ conda install -c conda-forge uv
 
 ```bash
 nado doctor               # show tools, installed versions, and compatibility
-nado seq   [args...]      # SeqNado
-nado plot  [args...]      # PlotNado
-nado track [args...]      # TrackNado
-nado quant [args...]      # QuantNado
-nado tab   [args...]      # TabNado
+nado seq    [args...]     # SeqNado
+nado plot   [args...]     # PlotNado
+nado track  [args...]     # TrackNado
+nado quant  [args...]     # QuantNado
+nado tab    [args...]     # TabNado
+nado regulo [args...]     # ReguloNado
 ```
 
 Each `nado` subcommand passes arguments through to the native tool CLI. If a tool is not installed, nadoverse prints the matching `uv pip install` command:
@@ -177,6 +181,18 @@ Available MCP tools:
 | `quantnado_metaplot` | Generate aggregate signal profiles around genomic features |
 | `quantnado_pca` | Run PCA over a QuantNado dataset |
 | `quantnado_locus_plot` | Plot signal over one locus |
+
+### ReguloNado MCP Tools
+
+| Tool | Description |
+|------|-------------|
+| `regulonado_build_dataset` | Build Arrow training datasets from BED, FASTA, and BigWig inputs |
+| `regulonado_train` | Launch or dry-run sequence-to-function model training |
+| `regulonado_scale_bigwigs` | Infer scale factors for BigWig files |
+| `regulonado_calculate_original_scaling` | Compute RPKM-to-raw-count scale factors from dataset metadata |
+| `regulonado_calculate_tmm_scaling` | Compute TMM normalisation factors |
+| `regulonado_enrich_metadata` | Write scaling fields into ReguloNado metadata |
+| `regulonado_recompress_dataset` | Rechunk/recompress saved Arrow datasets |
 
 ### TrackNado MCP Tools
 

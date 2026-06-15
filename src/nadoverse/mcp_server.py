@@ -34,8 +34,8 @@ mcp = FastMCP(
     instructions=(
         "Bioinformatics tools from the Milne group: genomics pipelines, "
         "signal quantification, genomic visualisation, track hub generation, "
-        "and Micro-Capture-C analysis. Call list_nado_tools first to confirm "
-        "which extras are installed."
+        "Micro-Capture-C analysis, and sequence-to-function model training. "
+        "Call list_nado_tools first to confirm which extras are installed."
     ),
 )
 
@@ -1462,6 +1462,416 @@ def tracknado_create(
     if seqnado_layout:
         args.append("--seqnado")
     return _run(args)
+
+
+# ─── ReguloNado ──────────────────────────────────────────────────────────────
+
+def _require_regulonado() -> None:
+    _require_cli("regulonado", "regulonado", "regulonado")
+
+
+@mcp.tool(
+    description=(
+        "Build a ReguloNado Hugging Face Arrow DatasetDict from BED intervals, "
+        "a reference FASTA, and BigWig signal tracks. The BED fourth column is "
+        "used as the fold label for train/validation/test splits. Provide either "
+        "explicit bigwig_files or a bigwig_dir. This can be a large CPU/I/O job."
+    ),
+    annotations={"readOnlyHint": False, "destructiveHint": False},
+)
+def regulonado_build_dataset(
+    bed_file: str,
+    fasta_file: str,
+    output_dir: str,
+    bigwig_files: Optional[list[str]] = None,
+    bigwig_dir: Optional[str] = None,
+    bigwig_glob: str = "*.bw",
+    splits: Optional[list[str]] = None,
+    context_length: int = 524_288,
+    bin_size: int = 32,
+    n_pred_bins: int = 6_144,
+    shift_max_bp: int = 0,
+    io_threads: int = 8,
+    num_proc: int = 1,
+    cache_dir: Optional[str] = None,
+    writer_batch_size: int = 500,
+    stage: bool = False,
+    overwrite: bool = False,
+    drop_missing: bool = False,
+    dedupe_tracks: str = "none",
+    profile: bool = False,
+    no_fast_path: bool = False,
+    n_extract_threads: int = 32,
+    signal_sample_chunk: int = 8,
+    signal_track_chunk: int = 128,
+    arrow_batch_size: int = 8,
+    arrow_compression: str = "lz4",
+    arrow_write_threads: Optional[int] = None,
+    strategy: str = "chrom_pass",
+    chroms: Optional[list[str]] = None,
+) -> str:
+    """
+    Args:
+        bed_file: BED file of genomic intervals. Column 4 must contain fold labels.
+        fasta_file: Reference genome FASTA path. A matching .fai index is required.
+        output_dir: Destination directory for the Arrow DatasetDict.
+        bigwig_files: Ordered BigWig paths, one per output track. Use this when
+            track order matters.
+        bigwig_dir: Directory containing BigWigs. Files are sorted by name and
+            filtered by bigwig_glob. Use instead of bigwig_files.
+        bigwig_glob: Glob used with bigwig_dir, e.g. '*.bw' or '*.bigwig'.
+        splits: Optional split definitions in ReguloNado format, e.g.
+            ['train:fold0,fold1', 'validation:fold4', 'test:fold3'].
+            If omitted, ReguloNado defaults are used.
+        context_length: Input sequence length in base pairs.
+        bin_size: Signal bin size in base pairs.
+        n_pred_bins: Number of bins predicted per sequence.
+        shift_max_bp: Shift-augmentation buffer on each side, in base pairs.
+        io_threads: Threads for parallel BigWig reads per sample.
+        num_proc: Parallel worker processes for dataset generation.
+        cache_dir: Optional Arrow/Hugging Face cache directory.
+        writer_batch_size: Samples buffered before flushing Arrow shards.
+        stage: Copy FASTA and BigWigs to scratch before building.
+        overwrite: Regenerate splits that already exist.
+        drop_missing: Drop missing BigWig paths instead of raising.
+        dedupe_tracks: Track deduplication mode: 'none', 'identity', or 'content'.
+        profile: Emit per-phase timing summaries for the fast path.
+        no_fast_path: Use the legacy pybigtools path instead of Rust extraction.
+        n_extract_threads: Rayon thread count for Rust BigWig extraction.
+        signal_sample_chunk: Samples per transpose block.
+        signal_track_chunk: Tracks per transpose block.
+        arrow_batch_size: Samples per Rust-written Arrow record batch.
+        arrow_compression: Arrow IPC compression: 'zstd', 'lz4', or 'none'.
+        arrow_write_threads: Concurrent Arrow shard writers. None lets
+            ReguloNado choose its default.
+        strategy: Build strategy: 'chrom_pass' or 'fast'.
+        chroms: Optional chromosomes to include; repeat values are passed as
+            repeated --chrom arguments.
+    """
+    _require_regulonado()
+    if bool(bigwig_files) == bool(bigwig_dir):
+        raise ValueError("Provide exactly one of bigwig_files or bigwig_dir.")
+
+    args = [
+        "regulonado", "build",
+        bed_file,
+        fasta_file,
+        output_dir,
+        "--bigwig-glob", bigwig_glob,
+        "--context-length", str(context_length),
+        "--bin-size", str(bin_size),
+        "--n-pred-bins", str(n_pred_bins),
+        "--shift-max-bp", str(shift_max_bp),
+        "--io-threads", str(io_threads),
+        "--num-proc", str(num_proc),
+        "--writer-batch-size", str(writer_batch_size),
+        "--dedupe-tracks", dedupe_tracks,
+        "--n-extract-threads", str(n_extract_threads),
+        "--signal-sample-chunk", str(signal_sample_chunk),
+        "--signal-track-chunk", str(signal_track_chunk),
+        "--arrow-batch-size", str(arrow_batch_size),
+        "--arrow-compression", arrow_compression,
+        "--strategy", strategy,
+    ]
+    if bigwig_files:
+        for path in bigwig_files:
+            args += ["--bigwig", path]
+    if bigwig_dir:
+        args += ["--bigwig-dir", bigwig_dir]
+    if splits:
+        for split in splits:
+            args += ["--split", split]
+    if cache_dir:
+        args += ["--cache-dir", cache_dir]
+    if stage:
+        args.append("--stage")
+    if overwrite:
+        args.append("--overwrite")
+    if drop_missing:
+        args.append("--drop-missing")
+    if profile:
+        args.append("--profile")
+    if no_fast_path:
+        args.append("--no-fast-path")
+    if arrow_write_threads is not None:
+        args += ["--arrow-write-threads", str(arrow_write_threads)]
+    if chroms:
+        for chrom in chroms:
+            args += ["--chrom", chrom]
+
+    output = _run(args)
+    return output or f"ReguloNado dataset written to {output_dir}"
+
+
+@mcp.tool(
+    description=(
+        "Launch ReguloNado model training for a saved Arrow dataset. By default "
+        "dry_run=True prints the resolved Python/torchrun command without running "
+        "training. Set dry_run=False to start the training job."
+    ),
+    annotations={"readOnlyHint": False, "destructiveHint": False},
+)
+def regulonado_train(
+    dataset: str,
+    output_dir: Optional[str] = None,
+    experiment: str = "condition_agnostic_borzoi",
+    nproc_per_node: int = 1,
+    resume_from_checkpoint: Optional[str] = None,
+    init_weights_from_checkpoint: Optional[str] = None,
+    max_steps: Optional[int] = None,
+    batch_size: Optional[int] = None,
+    eval_batch_size: Optional[int] = None,
+    learning_rate: Optional[float] = None,
+    backbone_lr: Optional[float] = None,
+    num_workers: Optional[int] = None,
+    no_wandb: bool = False,
+    dry_run: bool = True,
+    hydra_overrides: Optional[list[str]] = None,
+) -> str:
+    """
+    Args:
+        dataset: Saved ReguloNado/Hugging Face dataset directory.
+        output_dir: Optional run directory for checkpoints and diagnostics.
+        experiment: Hydra experiment config name, e.g. 'head_only_borzoi'.
+        nproc_per_node: Use torchrun with this many local processes when >1.
+        resume_from_checkpoint: Full Trainer resume from a checkpoint directory,
+            or 'true' for latest in output_dir.
+        init_weights_from_checkpoint: Warm start model weights only, with a fresh
+            optimizer and scheduler.
+        max_steps: Override trainer.max_steps.
+        batch_size: Override per-device training batch size.
+        eval_batch_size: Override per-device eval batch size.
+        learning_rate: Override head learning rate.
+        backbone_lr: Override backbone learning rate.
+        num_workers: Override DataLoader worker count.
+        no_wandb: Disable Weights & Biases logging.
+        dry_run: If True, print the resolved command without running training.
+        hydra_overrides: Additional raw Hydra overrides appended to the command,
+            e.g. ['trainer.max_eval_samples=200'].
+    """
+    _require_regulonado()
+    if resume_from_checkpoint and init_weights_from_checkpoint:
+        raise ValueError(
+            "Set only one of resume_from_checkpoint or init_weights_from_checkpoint."
+        )
+
+    args = [
+        "regulonado", "train",
+        dataset,
+        "--experiment", experiment,
+        "--nproc-per-node", str(nproc_per_node),
+    ]
+    if output_dir:
+        args += ["--output-dir", output_dir]
+    if resume_from_checkpoint:
+        args += ["--resume-from-checkpoint", resume_from_checkpoint]
+    if init_weights_from_checkpoint:
+        args += ["--init-weights-from-checkpoint", init_weights_from_checkpoint]
+    if max_steps is not None:
+        args += ["--max-steps", str(max_steps)]
+    if batch_size is not None:
+        args += ["--batch-size", str(batch_size)]
+    if eval_batch_size is not None:
+        args += ["--eval-batch-size", str(eval_batch_size)]
+    if learning_rate is not None:
+        args += ["--learning-rate", str(learning_rate)]
+    if backbone_lr is not None:
+        args += ["--backbone-lr", str(backbone_lr)]
+    if num_workers is not None:
+        args += ["--num-workers", str(num_workers)]
+    if no_wandb:
+        args.append("--no-wandb")
+    if dry_run:
+        args.append("--dry-run")
+    if hydra_overrides:
+        args.extend(hydra_overrides)
+
+    output = _run(args)
+    return output or "ReguloNado training command completed."
+
+
+@mcp.tool(
+    description=(
+        "Infer ReguloNado scale factors for all BigWig files in a directory and "
+        "write a CSV or parquet file."
+    ),
+    annotations={"readOnlyHint": False, "destructiveHint": False},
+)
+def regulonado_scale_bigwigs(
+    bigwig_dir: str,
+    output_path: str,
+    fmt: str = "parquet",
+    workers: int = 16,
+    glob: str = "*.bw",
+) -> str:
+    """
+    Args:
+        bigwig_dir: Directory containing .bw or .bigwig files.
+        output_path: Destination CSV or parquet path.
+        fmt: Output format: 'parquet' or 'csv'.
+        workers: Thread pool size.
+        glob: Glob pattern used to find BigWig files.
+    """
+    _require_regulonado()
+    return _run(
+        [
+            "regulonado", "scale",
+            bigwig_dir,
+            "--output", output_path,
+            "--format", fmt,
+            "--workers", str(workers),
+            "--glob", glob,
+        ]
+    )
+
+
+@mcp.tool(
+    description=(
+        "Infer original RPKM-to-raw-count scale factors from a ReguloNado "
+        "regulonado_metadata.json file. Run regulonado_enrich_metadata afterwards "
+        "to write these values into final_track_records before training."
+    ),
+    annotations={"readOnlyHint": False, "destructiveHint": False},
+)
+def regulonado_calculate_original_scaling(
+    metadata: str,
+    output_path: Optional[str] = None,
+    fmt: str = "parquet",
+    workers: int = 16,
+) -> str:
+    """
+    Args:
+        metadata: Path to regulonado_metadata.json.
+        output_path: Optional destination. Defaults to scale_factors.<fmt> next
+            to the metadata file.
+        fmt: Output format: 'parquet' or 'csv'.
+        workers: Thread pool size.
+    """
+    _require_regulonado()
+    args = [
+        "regulonado", "calculate-original-scaling",
+        metadata,
+        "--format", fmt,
+        "--workers", str(workers),
+    ]
+    if output_path:
+        args += ["--output", output_path]
+    return _run(args)
+
+
+@mcp.tool(
+    description=(
+        "Compute edgeR-style TMM normalisation factors from a ReguloNado Arrow "
+        "dataset and an existing scale-factors file. Run after "
+        "regulonado_calculate_original_scaling and before regulonado_enrich_metadata."
+    ),
+    annotations={"readOnlyHint": False, "destructiveHint": False},
+)
+def regulonado_calculate_tmm_scaling(
+    metadata: str,
+    scale_factors: Optional[str] = None,
+    output_path: Optional[str] = None,
+    fmt: str = "parquet",
+    split: str = "train",
+    trim_m: float = 0.3,
+    trim_a: float = 0.05,
+    min_count: float = 1.0,
+) -> str:
+    """
+    Args:
+        metadata: Path to regulonado_metadata.json.
+        scale_factors: Scale-factors parquet/CSV from original scaling. Defaults
+            to scale_factors.<fmt> next to metadata.
+        output_path: Optional destination. Defaults to overwriting scale_factors.
+        fmt: Output format: 'parquet' or 'csv'.
+        split: Dataset split to use for TMM estimation.
+        trim_m: Fraction trimmed from each M-value tail.
+        trim_a: Fraction trimmed from each A-value tail.
+        min_count: Minimum pseudo-count for a region to be included.
+    """
+    _require_regulonado()
+    args = [
+        "regulonado", "calculate-tmm-scaling",
+        metadata,
+        "--format", fmt,
+        "--split", split,
+        "--trim-m", str(trim_m),
+        "--trim-a", str(trim_a),
+        "--min-count", str(min_count),
+    ]
+    if scale_factors:
+        args += ["--scale-factors", scale_factors]
+    if output_path:
+        args += ["--output", output_path]
+    return _run(args)
+
+
+@mcp.tool(
+    description=(
+        "Write scale_factor, clip_soft, clip_hard, or other selected fields from "
+        "a ReguloNado scale-factors parquet/CSV into final_track_records in "
+        "regulonado_metadata.json. This updates the metadata file in place."
+    ),
+    annotations={"readOnlyHint": False, "destructiveHint": False},
+)
+def regulonado_enrich_metadata(
+    metadata: str,
+    scale_factors: str,
+    fields: Optional[list[str]] = None,
+) -> str:
+    """
+    Args:
+        metadata: Path to regulonado_metadata.json to update in place.
+        scale_factors: Parquet or CSV file produced by ReguloNado scaling.
+        fields: Optional field names to copy. Defaults to ReguloNado's
+            scale_factor, clip_soft, and clip_hard.
+    """
+    _require_regulonado()
+    args = ["regulonado", "enrich-metadata", metadata, scale_factors]
+    if fields:
+        for field in fields:
+            args += ["--field", field]
+    return _run(args)
+
+
+@mcp.tool(
+    description=(
+        "Rechunk/recompress a saved ReguloNado Arrow DatasetDict with ZSTD IPC "
+        "compression. Destination directory must not already exist."
+    ),
+    annotations={"readOnlyHint": False, "destructiveHint": False},
+)
+def regulonado_recompress_dataset(
+    src: str,
+    dst: str,
+    level: int = 3,
+    workers: int = 4,
+    max_batch_size: Optional[int] = None,
+    remove_src: bool = False,
+) -> str:
+    """
+    Args:
+        src: Source saved dataset directory.
+        dst: Destination directory; must not exist.
+        level: ZSTD compression level.
+        workers: Parallel shard workers.
+        max_batch_size: Optional maximum rows per Arrow record batch.
+        remove_src: Delete source dataset after successful recompression.
+    """
+    _require_regulonado()
+    args = [
+        "regulonado", "recompress-dataset",
+        src,
+        dst,
+        "--level", str(level),
+        "--workers", str(workers),
+    ]
+    if max_batch_size is not None:
+        args += ["--max-batch-size", str(max_batch_size)]
+    if remove_src:
+        args.append("--remove-src")
+    output = _run(args)
+    return output or f"Recompressed ReguloNado dataset written to {dst}"
 
 
 # ─── SeqNado ─────────────────────────────────────────────────────────────────
