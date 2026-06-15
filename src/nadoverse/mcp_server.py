@@ -5,7 +5,7 @@ Each tool imports its library lazily so the server starts even when only a
 subset of extras are installed. Missing packages produce a clear install hint.
 
 Usage:
-    pip install nadoverse[mcp]      # adds fastmcp
+    uv pip install "nadoverse[mcp]"      # adds fastmcp
 
     # stdio (default) — add to ~/.claude/mcp.json:
     { "mcpServers": { "nadoverse": { "command": "nadoverse-mcp" } } }
@@ -27,7 +27,7 @@ from nadoverse.registry import all_tools
 try:
     from fastmcp import FastMCP
 except ImportError:
-    raise ImportError("Run: pip install nadoverse[mcp]")
+    raise ImportError('Run: uv pip install "nadoverse[mcp]"')
 
 mcp = FastMCP(
     name="nadoverse",
@@ -41,7 +41,7 @@ mcp = FastMCP(
 
 
 def _install_hint(pypi_name: str, extra: str) -> str:
-    return f"{pypi_name} is not installed. Run: pip install nadoverse[{extra}]"
+    return f'{pypi_name} is not installed. Run: uv pip install "nadoverse[{extra}]"'
 
 
 def _run(cmd: list[str]) -> str:
@@ -141,7 +141,7 @@ def list_nado_tools() -> str:
             "installed": t.is_available(),
             "version": t.installed_version(),
             "cli_command": t.cli_command,
-            "install_hint": f"pip install nadoverse[{t.install_extra}]",
+            "install_hint": f'uv pip install "nadoverse[{t.install_extra}]"',
             "input_types": t.input_types,
             "output_types": t.output_types,
             "python_compatible": t.python_compatible(),

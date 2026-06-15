@@ -26,7 +26,7 @@ def _require_tool(tool: NadoTool, extra_hint: Optional[str] = None) -> None:
         extra = extra_hint or tool.install_extra
         console.print(
             f"[bold red]{tool.name}[/bold red] is not installed.\n"
-            f"Run: [bold]pip install nadoverse\\[{extra}][/bold]",
+            f"Run: [bold]uv pip install \"nadoverse\\[{extra}]\"[/bold]",
             highlight=False,
         )
         raise typer.Exit(1)
@@ -122,7 +122,7 @@ def doctor() -> None:
         compat = tool.python_compatible()
 
         if not available:
-            status = f"pip install nadoverse[{tool.install_extra}]"
+            status = f'uv pip install "nadoverse[{tool.install_extra}]"'
             marker = "[red]✗[/red]"
             version = "—"
         elif not compat:

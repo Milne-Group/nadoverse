@@ -7,7 +7,7 @@ name = "nadoverse"
 dynamic = ["version"]
 description = "Unified installer and CLI for the *Nado bioinformatics toolkit"
 readme = "README.md"
-requires-python = ">=3.12"
+requires-python = ">=3.12,<3.14"
 license = { text = "MIT" }
 authors = [{ name = "Alastair Smith", email = "alastair.smith@ndcls.ox.ac.uk" }]
 keywords = ["bioinformatics", "genomics", "sequencing", "meta-package"]
@@ -19,7 +19,7 @@ classifiers = [
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
 ]
-dependencies = ["typer", 'pandas']
+dependencies = ["typer", "rich", "pandas"]
 
 [project.optional-dependencies]
 seqnado   = ["seqnado>=1.0.6"]
@@ -28,10 +28,17 @@ tracknado = ["tracknado>=0.3.1"]
 bamnado   = ["bamnado>=0.6.1"]
 quantnado = ["quantnado>=0.4.8"]
 mccnado   = ["mccnado>=0.1.5"]
-tabnado   = ["TabNado>=0.1.0"]
+tabnado   = [
+    "TabNado>=0.1.0; python_version < '3.13' and (sys_platform != 'darwin' or platform_machine != 'x86_64')",
+]
 mcp       = ["fastmcp>=3.0"]
 all       = [
-    "nadoverse[seqnado,plotnado,tracknado,bamnado,quantnado,mccnado,tabnado]",
+    "seqnado>=1.0.6",
+    "plotnado>=0.3.1",
+    "tracknado>=0.3.1",
+    "bamnado>=0.6.1",
+    "quantnado>=0.4.8",
+    "mccnado>=0.1.5",
 ]
 dev = [
     "pytest>=8.0",
@@ -57,3 +64,8 @@ packages = ["src/nadoverse"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+[tool.uv]
+environments = [
+    "sys_platform != 'darwin' or platform_machine != 'x86_64'",
+]

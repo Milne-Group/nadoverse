@@ -64,5 +64,5 @@ def test_missing_tool_shows_install_hint(monkeypatch):
         tool = get_tool("seqnado")
         assert tool is not None
         assert not tool.is_available()
-        hint = f"pip install nadoverse[{tool.install_extra}]"
-        assert hint == "pip install nadoverse[seqnado]"
+        hint = f'uv pip install "nadoverse[{tool.install_extra}]"'
+        assert hint == 'uv pip install "nadoverse[seqnado]"'
